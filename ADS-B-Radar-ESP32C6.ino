@@ -3,52 +3,25 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Arduino_GFX_Library.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <math.h>
 
 // ======================================================
-// WIFI - AGREGA TUS REDES ACA
+// CONFIGURACION GENERAL
 // ======================================================
 
-struct WifiNetwork {
-  const char* ssid;
-  const char* password;
-};
-
-WifiNetwork wifiNetworks[] = {
-  { "TU_WIFI_1", "TU_CLAVE_1" },
-  { "TU_WIFI_2", "TU_CLAVE_2" },
-  { "TU_HOTSPOT", "TU_CLAVE_3" }
-};
-
-const int WIFI_NETWORK_COUNT =
-  sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
-
-// ======================================================
-// UBICACION DEL RADAR
-// ======================================================
-
-const double MY_LAT = -31.380000;
-const double MY_LON = -57.980000;
-
-// ======================================================
-// RADIOS
-// ======================================================
-
-const int BASE_RADIUS_NM = 15;
 const int SEARCH_LEVELS = 5;
-
-// ======================================================
-// TIEMPOS
-// ======================================================
-
 const unsigned long UPDATE_INTERVAL = 30000;
 const unsigned long MANUAL_SCREEN_DURATION = 15000;
 const unsigned long STARTUP_DISPLAY_DURATION = 60000;
 const unsigned long ALERT_DURATION = 30000;
 const unsigned long BLINK_INTERVAL = 400;
+const unsigned long CONFIG_BUTTON_HOLD = 3000;
 
 // ======================================================
-// COLORES
+// COLORES RGB565
 // ======================================================
 
 #define BLACK       0x0000
@@ -96,7 +69,33 @@ Arduino_GFX *gfx = new Arduino_ST7789(
 );
 
 // ======================================================
-// AVIONES
+// CONFIGURACION PERSISTENTE
+// ======================================================
+
+Preferences preferences;
+
+struct DeviceConfig {
+  String ssid1;
+  String pass1;
+  String ssid2;
+  String pass2;
+  String ssid3;
+  String pass3;
+  double latitude;
+  double longitude;
+  int baseRadiusNM;
+  bool configured;
+};
+
+DeviceConfig config;
+
+const char* CONFIG_AP_SSID = "ADS-B-Radar-Setup";
+const byte DNS_PORT = 53;
+DNSServer dnsServer;
+WebServer webServer(80);
+
+// ======================================================
+// DATOS DE AVIONES
 // ======================================================
 
 struct Aircraft {
@@ -126,59 +125,47 @@ unsigned long lastUpdate = 0;
 bool baseHasAircraft = false;
 bool hadBaseAircraft = false;
 
-// ======================================================
-// MODO MANUAL
-// ======================================================
-
 bool manualMode = false;
 int manualLevel = 0;
 unsigned long manualScreenStart = 0;
-
-// ======================================================
-// MODO INICIAL
-// ======================================================
 
 bool startupMode = true;
 bool startupFoundAircraft = false;
 unsigned long startupDisplayStart = 0;
 
-// ======================================================
-// RADIO QUE SE ESTA MOSTRANDO
-// ======================================================
-
-int displayedRadiusNM = BASE_RADIUS_NM;
-
-// ======================================================
-// LED
-// ======================================================
+int displayedRadiusNM = 15;
 
 bool alertBlinking = false;
 bool ledState = false;
 unsigned long alertStart = 0;
 unsigned long lastBlink = 0;
 
-// ======================================================
-// CACHE RUTA
-// ======================================================
-
 String lastRouteCallsign = "";
 String lastOrigin = "";
 String lastDestination = "";
 
 // ======================================================
-// MATEMATICA
+// UTILIDADES
 // ======================================================
 
-double degToRad(double deg) { return deg * PI / 180.0; }
-double radToDeg(double rad) { return rad * 180.0 / PI; }
+double degToRad(double deg) {
+  return deg * PI / 180.0;
+}
+
+double radToDeg(double rad) {
+  return rad * 180.0 / PI;
+}
 
 double getDistanceKm(double lat1, double lon1, double lat2, double lon2) {
   const double R = 6371.0;
   double dLat = degToRad(lat2 - lat1);
   double dLon = degToRad(lon2 - lon1);
-  double a = sin(dLat / 2.0) * sin(dLat / 2.0) +
-             cos(degToRad(lat1)) * cos(degToRad(lat2)) *
-             sin(dLon / 2.0) * sin(dLon / 2.0);
+
+  double a =
+    sin(dLat / 2.0) * sin(dLat / 2.0) +
+    cos(degToRad(lat1)) * cos(degToRad(lat2)) *
+    sin(dLon / 2.0) * sin(dLon / 2.0);
+
   double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
   return R * c;
 }
@@ -187,15 +174,17 @@ double getBearing(double lat1, double lon1, double lat2, double lon2) {
   double p1 = degToRad(lat1);
   double p2 = degToRad(lat2);
   double dLon = degToRad(lon2 - lon1);
+
   double y = sin(dLon) * cos(p2);
   double x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dLon);
+
   double brg = radToDeg(atan2(y, x));
   return fmod(brg + 360.0, 360.0);
 }
 
 String bearingToText(double bearing) {
   if (bearing >= 337.5 || bearing < 22.5) return "N";
-  if (bearing < 67.5)  return "NE";
+  if (bearing < 67.5) return "NE";
   if (bearing < 112.5) return "E";
   if (bearing < 157.5) return "SE";
   if (bearing < 202.5) return "S";
@@ -204,19 +193,31 @@ String bearingToText(double bearing) {
   return "NO";
 }
 
+int radiusForLevel(int level) {
+  int radius = config.baseRadiusNM * (1 << level);
+  if (radius > 250) radius = 250;
+  return radius;
+}
+
 // ======================================================
-// PANTALLA
+// PANTALLA Y RGB
 // ======================================================
 
-void screenOn() { digitalWrite(LCD_BL, HIGH); }
-void screenOff() { digitalWrite(LCD_BL, LOW); }
+void screenOn() {
+  digitalWrite(LCD_BL, HIGH);
+}
 
-// ======================================================
-// RGB
-// ======================================================
+void screenOff() {
+  digitalWrite(LCD_BL, LOW);
+}
 
-void rgbOn() { rgbLedWrite(RGB_LED, 255, 0, 0); }
-void rgbOff() { rgbLedWrite(RGB_LED, 0, 0, 0); }
+void rgbOn() {
+  rgbLedWrite(RGB_LED, 255, 0, 0);
+}
+
+void rgbOff() {
+  rgbLedWrite(RGB_LED, 0, 0, 0);
+}
 
 void startAircraftAlert() {
   alertBlinking = true;
@@ -244,16 +245,270 @@ void updateAircraftAlert() {
 }
 
 // ======================================================
+// PREFERENCES
+// ======================================================
+
+void loadConfig() {
+  preferences.begin("adsbradar", true);
+
+  config.ssid1 = preferences.getString("ssid1", "");
+  config.pass1 = preferences.getString("pass1", "");
+  config.ssid2 = preferences.getString("ssid2", "");
+  config.pass2 = preferences.getString("pass2", "");
+  config.ssid3 = preferences.getString("ssid3", "");
+  config.pass3 = preferences.getString("pass3", "");
+
+  config.latitude = preferences.getDouble("lat", -31.380000);
+  config.longitude = preferences.getDouble("lon", -57.980000);
+  config.baseRadiusNM = preferences.getInt("radius", 15);
+  config.configured = preferences.getBool("configured", false);
+
+  preferences.end();
+
+  if (config.baseRadiusNM < 1) config.baseRadiusNM = 15;
+  if (config.baseRadiusNM > 250) config.baseRadiusNM = 250;
+
+  displayedRadiusNM = config.baseRadiusNM;
+}
+
+void saveConfig() {
+  preferences.begin("adsbradar", false);
+
+  preferences.putString("ssid1", config.ssid1);
+  preferences.putString("pass1", config.pass1);
+  preferences.putString("ssid2", config.ssid2);
+  preferences.putString("pass2", config.pass2);
+  preferences.putString("ssid3", config.ssid3);
+  preferences.putString("pass3", config.pass3);
+
+  preferences.putDouble("lat", config.latitude);
+  preferences.putDouble("lon", config.longitude);
+  preferences.putInt("radius", config.baseRadiusNM);
+  preferences.putBool("configured", true);
+
+  preferences.end();
+}
+
+// ======================================================
+// PORTAL CAUTIVO
+// ======================================================
+
+String htmlEscape(const String &value) {
+  String out = value;
+  out.replace("&", "&amp;");
+  out.replace("\"", "&quot;");
+  out.replace("<", "&lt;");
+  out.replace(">", "&gt;");
+  return out;
+}
+
+String buildConfigPage() {
+  String html;
+  html.reserve(7000);
+
+  html += "<!DOCTYPE html><html lang='es'><head>";
+  html += "<meta charset='utf-8'>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>ADS-B Radar Setup</title>";
+  html += "<style>";
+  html += "body{font-family:Arial,sans-serif;background:#101318;color:#eee;margin:0;padding:20px}";
+  html += ".card{max-width:520px;margin:auto;background:#1b2028;padding:22px;border-radius:14px}";
+  html += "h1{font-size:24px;margin:0 0 8px;color:#4dd0e1}";
+  html += "p{color:#aeb8c4;line-height:1.45}";
+  html += "label{display:block;margin-top:14px;margin-bottom:5px;font-weight:bold}";
+  html += "input{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;border:1px solid #3b4552;background:#0e1116;color:#fff;font-size:16px}";
+  html += ".grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}";
+  html += "button{width:100%;margin-top:22px;padding:14px;border:0;border-radius:9px;background:#00acc1;color:white;font-size:17px;font-weight:bold}";
+  html += ".small{font-size:13px;color:#8794a3}";
+  html += "@media(max-width:520px){.grid{grid-template-columns:1fr}}";
+  html += "</style></head><body><div class='card'>";
+  html += "<h1>ADS-B Radar</h1>";
+  html += "<p>Configurá hasta tres redes Wi-Fi, la ubicación del radar y el radio base.</p>";
+  html += "<form method='POST' action='/save'>";
+
+  html += "<label>Wi-Fi 1</label><input name='ssid1' value='" + htmlEscape(config.ssid1) + "' placeholder='SSID principal'>";
+  html += "<label>Clave Wi-Fi 1</label><input type='password' name='pass1' value='" + htmlEscape(config.pass1) + "' placeholder='Clave'>";
+
+  html += "<label>Wi-Fi 2</label><input name='ssid2' value='" + htmlEscape(config.ssid2) + "' placeholder='SSID opcional'>";
+  html += "<label>Clave Wi-Fi 2</label><input type='password' name='pass2' value='" + htmlEscape(config.pass2) + "' placeholder='Clave'>";
+
+  html += "<label>Wi-Fi 3</label><input name='ssid3' value='" + htmlEscape(config.ssid3) + "' placeholder='Hotspot opcional'>";
+  html += "<label>Clave Wi-Fi 3</label><input type='password' name='pass3' value='" + htmlEscape(config.pass3) + "' placeholder='Clave'>";
+
+  html += "<div class='grid'>";
+  html += "<div><label>Latitud</label><input type='number' step='0.000001' name='lat' value='" + String(config.latitude, 6) + "' required></div>";
+  html += "<div><label>Longitud</label><input type='number' step='0.000001' name='lon' value='" + String(config.longitude, 6) + "' required></div>";
+  html += "</div>";
+
+  html += "<label>Radio base (NM)</label><input type='number' min='1' max='250' name='radius' value='" + String(config.baseRadiusNM) + "' required>";
+  html += "<p class='small'>La pantalla queda encendida automáticamente solo cuando hay vuelos dentro de este radio. El máximo admitido por la API es 250 NM.</p>";
+
+  html += "<button type='submit'>Guardar y reiniciar</button>";
+  html += "</form></div></body></html>";
+
+  return html;
+}
+
+void handlePortalRoot() {
+  webServer.send(200, "text/html; charset=utf-8", buildConfigPage());
+}
+
+void handlePortalSave() {
+  config.ssid1 = webServer.arg("ssid1");
+  config.pass1 = webServer.arg("pass1");
+  config.ssid2 = webServer.arg("ssid2");
+  config.pass2 = webServer.arg("pass2");
+  config.ssid3 = webServer.arg("ssid3");
+  config.pass3 = webServer.arg("pass3");
+
+  config.latitude = webServer.arg("lat").toDouble();
+  config.longitude = webServer.arg("lon").toDouble();
+  config.baseRadiusNM = webServer.arg("radius").toInt();
+
+  if (config.baseRadiusNM < 1) config.baseRadiusNM = 15;
+  if (config.baseRadiusNM > 250) config.baseRadiusNM = 250;
+
+  saveConfig();
+
+  String page =
+    "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>body{font-family:Arial;background:#101318;color:#eee;text-align:center;padding:40px}h2{color:#4dd0e1}</style></head>"
+    "<body><h2>Configuración guardada</h2><p>El radar se reiniciará ahora.</p></body></html>";
+
+  webServer.send(200, "text/html; charset=utf-8", page);
+  delay(1200);
+  ESP.restart();
+}
+
+void startConfigPortal() {
+  screenOn();
+  rgbOff();
+
+  WiFi.disconnect(true);
+  delay(300);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(CONFIG_AP_SSID);
+
+  IPAddress apIP = WiFi.softAPIP();
+  dnsServer.start(DNS_PORT, "*", apIP);
+
+  webServer.on("/", HTTP_GET, handlePortalRoot);
+  webServer.on("/save", HTTP_POST, handlePortalSave);
+  webServer.onNotFound(handlePortalRoot);
+  webServer.begin();
+
+  gfx->fillScreen(BLACK);
+  gfx->setTextColor(CYAN);
+  gfx->setTextSize(2);
+  gfx->setCursor(28, 24);
+  gfx->println("MODO CONFIG");
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(WHITE);
+  gfx->setCursor(22, 62);
+  gfx->println("Conectate a:");
+
+  gfx->setTextColor(YELLOW);
+  gfx->setTextSize(2);
+  gfx->setCursor(22, 78);
+  gfx->println("ADS-B-Radar-Setup");
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(GREY);
+  gfx->setCursor(22, 112);
+  gfx->println("Abrir navegador:");
+
+  gfx->setTextColor(WHITE);
+  gfx->setTextSize(2);
+  gfx->setCursor(22, 128);
+  gfx->println(apIP.toString());
+
+  Serial.println();
+  Serial.println("Portal cautivo iniciado");
+  Serial.print("SSID: ");
+  Serial.println(CONFIG_AP_SSID);
+  Serial.print("IP: ");
+  Serial.println(apIP);
+
+  while (true) {
+    dnsServer.processNextRequest();
+    webServer.handleClient();
+    delay(2);
+  }
+}
+
+bool bootHeldForConfig() {
+  if (digitalRead(BUTTON_BOOT) != LOW) return false;
+
+  unsigned long start = millis();
+
+  gfx->fillScreen(BLACK);
+  gfx->setTextColor(YELLOW);
+  gfx->setTextSize(2);
+  gfx->setCursor(30, 55);
+  gfx->println("MANTENER BOOT");
+  gfx->setTextSize(1);
+  gfx->setTextColor(GREY);
+  gfx->setCursor(65, 88);
+  gfx->println("para configurar");
+
+  while (digitalRead(BUTTON_BOOT) == LOW) {
+    if (millis() - start >= CONFIG_BUTTON_HOLD) return true;
+    delay(20);
+  }
+
+  return false;
+}
+
+// ======================================================
 // WIFI
 // ======================================================
 
-void connectWiFi() {
+bool tryWiFiNetwork(const String &ssid, const String &password) {
+  if (ssid.length() == 0) return false;
+
+  Serial.print("Probando WiFi: ");
+  Serial.println(ssid);
+
+  gfx->fillRect(15, 82, 295, 42, BLACK);
+  gfx->setTextColor(GREY);
+  gfx->setTextSize(1);
+  gfx->setCursor(15, 84);
+  gfx->print("Probando: ");
+  gfx->setTextColor(WHITE);
+  gfx->print(ssid);
+
+  WiFi.begin(ssid.c_str(), password.c_str());
+
+  unsigned long started = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - started < 8000) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi conectado: ");
+    Serial.println(WiFi.SSID());
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    return true;
+  }
+
+  WiFi.disconnect();
+  delay(250);
+  return false;
+}
+
+bool connectWiFi() {
   screenOn();
+
   gfx->fillScreen(BLACK);
   gfx->setTextColor(CYAN);
   gfx->setTextSize(2);
   gfx->setCursor(15, 30);
   gfx->println("RADAR ADS-B");
+
   gfx->setTextSize(1);
   gfx->setTextColor(WHITE);
   gfx->setCursor(15, 65);
@@ -261,60 +516,24 @@ void connectWiFi() {
 
   WiFi.mode(WIFI_STA);
 
-  while (WiFi.status() != WL_CONNECTED) {
-    for (int i = 0; i < WIFI_NETWORK_COUNT; i++) {
-      Serial.println();
-      Serial.print("Probando WiFi: ");
-      Serial.println(wifiNetworks[i].ssid);
+  if (tryWiFiNetwork(config.ssid1, config.pass1) ||
+      tryWiFiNetwork(config.ssid2, config.pass2) ||
+      tryWiFiNetwork(config.ssid3, config.pass3)) {
 
-      gfx->fillRect(15, 85, 295, 40, BLACK);
-      gfx->setTextColor(GREY);
-      gfx->setTextSize(1);
-      gfx->setCursor(15, 85);
-      gfx->print("Probando: ");
-      gfx->setTextColor(WHITE);
-      gfx->print(wifiNetworks[i].ssid);
+    gfx->fillRect(15, 82, 295, 42, BLACK);
+    gfx->setTextColor(GREEN);
+    gfx->setCursor(15, 84);
+    gfx->println("WiFi OK");
 
-      WiFi.begin(wifiNetworks[i].ssid, wifiNetworks[i].password);
-      unsigned long startAttempt = millis();
-
-      while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 7000) {
-        delay(250);
-        Serial.print(".");
-      }
-
-      if (WiFi.status() == WL_CONNECTED) {
-        Serial.println();
-        Serial.println("WiFi conectado");
-        Serial.print("SSID: ");
-        Serial.println(WiFi.SSID());
-        Serial.print("IP: ");
-        Serial.println(WiFi.localIP());
-
-        gfx->fillRect(15, 85, 295, 40, BLACK);
-        gfx->setTextColor(GREEN);
-        gfx->setCursor(15, 85);
-        gfx->println("WiFi OK");
-        gfx->setTextColor(WHITE);
-        gfx->setCursor(15, 100);
-        gfx->print("Red: ");
-        gfx->println(WiFi.SSID());
-        delay(700);
-        return;
-      }
-
-      WiFi.disconnect();
-      delay(300);
-    }
-
-    gfx->fillRect(15, 85, 295, 40, BLACK);
-    gfx->setTextColor(RED);
-    gfx->setCursor(15, 85);
-    gfx->println("Sin WiFi");
-    Serial.println();
-    Serial.println("Ninguna red disponible");
-    delay(5000);
+    gfx->setTextColor(WHITE);
+    gfx->setCursor(15, 100);
+    gfx->print("Red: ");
+    gfx->println(WiFi.SSID());
+    delay(700);
+    return true;
   }
+
+  return false;
 }
 
 // ======================================================
@@ -324,6 +543,7 @@ void connectWiFi() {
 void getRoute(Aircraft &a) {
   a.origin = "---";
   a.destination = "---";
+
   if (a.callsign.length() == 0) return;
 
   if (a.callsign == lastRouteCallsign) {
@@ -332,26 +552,19 @@ void getRoute(Aircraft &a) {
     return;
   }
 
-  Serial.print("Buscando ruta: ");
-  Serial.println(a.callsign);
-
   WiFiClientSecure client;
   client.setInsecure();
+
   HTTPClient http;
   String url = "https://api.adsbdb.com/v0/callsign/" + a.callsign;
 
-  if (!http.begin(client, url)) {
-    Serial.println("Error API ruta");
-    return;
-  }
+  if (!http.begin(client, url)) return;
 
   http.setTimeout(10000);
   http.addHeader("User-Agent", "ESP32-C6-FlightRadar/1.0");
   http.addHeader("Accept", "application/json");
 
   int code = http.GET();
-  Serial.print("Ruta HTTP: ");
-  Serial.println(code);
 
   if (code != 200) {
     http.end();
@@ -365,8 +578,6 @@ void getRoute(Aircraft &a) {
   DeserializationError error = deserializeJson(doc, http.getStream());
 
   if (error) {
-    Serial.print("JSON ruta: ");
-    Serial.println(error.c_str());
     http.end();
     return;
   }
@@ -396,11 +607,6 @@ void getRoute(Aircraft &a) {
   lastOrigin = a.origin;
   lastDestination = a.destination;
 
-  Serial.print("Ruta: ");
-  Serial.print(a.origin);
-  Serial.print(" -> ");
-  Serial.println(a.destination);
-
   http.end();
 }
 
@@ -409,18 +615,25 @@ void getRoute(Aircraft &a) {
 // ======================================================
 
 bool getAircraft(int radiusNM) {
-  if (WiFi.status() != WL_CONNECTED) connectWiFi();
+  if (WiFi.status() != WL_CONNECTED) {
+    if (!connectWiFi()) {
+      startConfigPortal();
+      return false;
+    }
+  }
+
   if (radiusNM > 250) radiusNM = 250;
   displayedRadiusNM = radiusNM;
 
   WiFiClientSecure client;
   client.setInsecure();
+
   HTTPClient http;
 
   String url =
     "https://api.airplanes.live/v2/point/" +
-    String(MY_LAT, 6) + "/" +
-    String(MY_LON, 6) + "/" +
+    String(config.latitude, 6) + "/" +
+    String(config.longitude, 6) + "/" +
     String(radiusNM);
 
   Serial.println();
@@ -428,10 +641,7 @@ bool getAircraft(int radiusNM) {
   Serial.print(radiusNM);
   Serial.println(" NM");
 
-  if (!http.begin(client, url)) {
-    Serial.println("Error HTTP");
-    return false;
-  }
+  if (!http.begin(client, url)) return false;
 
   http.setTimeout(15000);
   http.addHeader("User-Agent", "ESP32-C6-FlightRadar/1.0");
@@ -483,9 +693,7 @@ bool getAircraft(int radiusNM) {
     double gs = plane["gs"] | 0.0;
     a.speed = gs * 1.852;
 
-    if (plane["alt_baro"].is<float>() ||
-        plane["alt_baro"].is<int>() ||
-        plane["alt_baro"].is<double>()) {
+    if (plane["alt_baro"].is<float>() || plane["alt_baro"].is<int>() || plane["alt_baro"].is<double>()) {
       double altFt = plane["alt_baro"];
       a.altitude = altFt * 0.3048;
     } else {
@@ -493,8 +701,9 @@ bool getAircraft(int radiusNM) {
     }
 
     a.track = plane["track"] | 0.0;
-    a.distanceKm = getDistanceKm(MY_LAT, MY_LON, a.lat, a.lon);
-    a.bearing = getBearing(MY_LAT, MY_LON, a.lat, a.lon);
+    a.distanceKm = getDistanceKm(config.latitude, config.longitude, a.lat, a.lon);
+    a.bearing = getBearing(config.latitude, config.longitude, a.lat, a.lon);
+
     aircraftCount++;
   }
 
@@ -514,7 +723,6 @@ bool getAircraft(int radiusNM) {
   Serial.println(aircraftCount);
 
   if (aircraftCount > 0) getRoute(aircraft[0]);
-
   return true;
 }
 
@@ -539,6 +747,7 @@ void drawPlane(int x, int y, double heading, uint16_t color) {
   int wy1 = y + py * 5;
   int wx2 = x - px * 5;
   int wy2 = y - py * 5;
+
   int sx1 = tx + px * 3;
   int sy1 = ty + py * 3;
   int sx2 = tx - px * 3;
@@ -560,6 +769,7 @@ void drawRadar() {
   const int CX = 82;
   const int CY = 86;
   const int R = 70;
+
   double maxKm = displayedRadiusNM * 1.852;
 
   gfx->drawCircle(CX, CY, R, DARKGREY);
@@ -583,12 +793,11 @@ void drawRadar() {
     double normalized = a.distanceKm / maxKm;
     double radius = normalized * R;
     double angle = degToRad(a.bearing - 90.0);
+
     int x = CX + cos(angle) * radius;
     int y = CY + sin(angle) * radius;
 
-    uint16_t color = CYAN;
-    if (i == 0) color = YELLOW;
-
+    uint16_t color = (i == 0) ? YELLOW : CYAN;
     drawPlane(x, y, a.track, color);
 
     if (i < 5 && a.callsign.length() > 0) {
@@ -597,6 +806,7 @@ void drawRadar() {
 
       int labelX = x + 5;
       int labelY = y - 10;
+
       if (labelX > 130) labelX = x - 35;
       if (labelY < 0) labelY = y + 5;
 
@@ -610,9 +820,7 @@ void drawRadar() {
   gfx->drawLine(168, 0, 168, 171, DARKGREY);
 
   gfx->setTextSize(1);
-  if (manualMode || startupMode) gfx->setTextColor(YELLOW);
-  else gfx->setTextColor(CYAN);
-
+  gfx->setTextColor((manualMode || startupMode) ? YELLOW : CYAN);
   gfx->setCursor(177, 3);
   gfx->print(displayedRadiusNM);
   gfx->print("NM ");
@@ -634,6 +842,7 @@ void drawRadar() {
   gfx->setTextColor(YELLOW);
   gfx->setTextSize(2);
   gfx->setCursor(177, 20);
+
   String cs = a.callsign;
   if (cs.length() > 8) cs = cs.substring(0, 8);
   gfx->print(cs);
@@ -688,10 +897,7 @@ void drawRadar() {
 // ======================================================
 
 void performBaseSearch() {
-  Serial.println();
-  Serial.println("=== RADIO BASE ===");
-
-  if (!getAircraft(BASE_RADIUS_NM)) return;
+  if (!getAircraft(config.baseRadiusNM)) return;
 
   baseHasAircraft = aircraftCount > 0;
 
@@ -700,17 +906,12 @@ void performBaseSearch() {
     manualLevel = 0;
     screenOn();
 
-    if (!hadBaseAircraft) {
-      Serial.println("*** ENTRO UN VUELO AL RADIO BASE ***");
-      startAircraftAlert();
-    }
+    if (!hadBaseAircraft) startAircraftAlert();
 
     hadBaseAircraft = true;
     drawRadar();
     return;
   }
-
-  if (hadBaseAircraft) Serial.println("*** RADIO BASE VACIO ***");
 
   hadBaseAircraft = false;
   alertBlinking = false;
@@ -731,34 +932,23 @@ void performStartupSearch() {
   startupFoundAircraft = false;
   screenOn();
 
-  Serial.println();
-  Serial.println("================================");
-  Serial.println(" BUSQUEDA INICIAL");
-  Serial.println("================================");
-
   for (int level = 0; level < SEARCH_LEVELS; level++) {
-    int radius = BASE_RADIUS_NM * (1 << level);
-    if (radius > 250) radius = 250;
+    int radius = radiusForLevel(level);
 
     gfx->fillScreen(BLACK);
     gfx->setTextColor(CYAN);
     gfx->setTextSize(2);
     gfx->setCursor(70, 45);
     gfx->print("BUSCANDO");
+
     gfx->setTextColor(YELLOW);
     gfx->setCursor(95, 75);
     gfx->print(radius);
     gfx->print(" NM");
 
-    Serial.print("Inicio: ");
-    Serial.print(radius);
-    Serial.println(" NM");
-
     if (getAircraft(radius) && aircraftCount > 0) {
       startupFoundAircraft = true;
       startupDisplayStart = millis();
-      Serial.print("Encontrados: ");
-      Serial.println(aircraftCount);
       drawRadar();
       return;
     }
@@ -767,28 +957,25 @@ void performStartupSearch() {
     delay(400);
   }
 
-  Serial.println("Sin vuelos en busqueda inicial");
-
   startupMode = false;
   startupFoundAircraft = false;
   aircraftCount = 0;
-  displayedRadiusNM = BASE_RADIUS_NM;
+  displayedRadiusNM = config.baseRadiusNM;
   baseHasAircraft = false;
   hadBaseAircraft = false;
+
   gfx->fillScreen(BLACK);
   screenOff();
 }
 
 void updateStartupMode() {
   if (!startupMode || !startupFoundAircraft) return;
-  if (millis() - startupDisplayStart < STARTUP_DISPLAY_DURATION) return;
 
-  Serial.println();
-  Serial.println("Fin busqueda inicial");
+  if (millis() - startupDisplayStart < STARTUP_DISPLAY_DURATION) return;
 
   startupMode = false;
   startupFoundAircraft = false;
-  displayedRadiusNM = BASE_RADIUS_NM;
+  displayedRadiusNM = config.baseRadiusNM;
   manualMode = false;
   manualLevel = 0;
 
@@ -797,27 +984,18 @@ void updateStartupMode() {
 }
 
 // ======================================================
-// BUSQUEDA MANUAL
+// BUSQUEDA MANUAL CON BOOT
 // ======================================================
 
 void performManualSearch() {
   manualLevel++;
   if (manualLevel > SEARCH_LEVELS) manualLevel = 1;
 
-  int multiplier = 1 << (manualLevel - 1);
-  int radius = BASE_RADIUS_NM * multiplier;
-  if (radius > 250) radius = 250;
+  int radius = radiusForLevel(manualLevel - 1);
 
   manualMode = true;
   manualScreenStart = millis();
   screenOn();
-
-  Serial.println();
-  Serial.print("BOOT NIVEL ");
-  Serial.print(manualLevel);
-  Serial.print(" - ");
-  Serial.print(radius);
-  Serial.println(" NM");
 
   gfx->fillScreen(BLACK);
   gfx->setTextColor(YELLOW);
@@ -826,6 +1004,7 @@ void performManualSearch() {
   gfx->print("RADAR ");
   gfx->print(radius);
   gfx->print("NM");
+
   gfx->setTextSize(1);
   gfx->setTextColor(GREY);
   gfx->setCursor(105, 85);
@@ -833,10 +1012,6 @@ void performManualSearch() {
 
   if (getAircraft(radius)) drawRadar();
 }
-
-// ======================================================
-// BOTON BOOT
-// ======================================================
 
 void updateButton() {
   static bool previousButton = HIGH;
@@ -857,21 +1032,15 @@ void updateButton() {
   previousButton = button;
 }
 
-// ======================================================
-// TIMEOUT MANUAL
-// ======================================================
-
 void updateManualTimeout() {
   if (!manualMode) return;
   if (millis() - manualScreenStart < MANUAL_SCREEN_DURATION) return;
-
-  Serial.println("Fin modo manual");
 
   manualMode = false;
   manualLevel = 0;
 
   if (baseHasAircraft) {
-    displayedRadiusNM = BASE_RADIUS_NM;
+    displayedRadiusNM = config.baseRadiusNM;
     performBaseSearch();
   } else {
     gfx->fillScreen(BLACK);
@@ -885,7 +1054,7 @@ void updateManualTimeout() {
 
 void setup() {
   Serial.begin(115200);
-  delay(2000);
+  delay(1200);
 
   pinMode(LCD_BL, OUTPUT);
   pinMode(BUTTON_BOOT, INPUT_PULLUP);
@@ -897,7 +1066,23 @@ void setup() {
   gfx->begin();
   gfx->fillScreen(BLACK);
 
-  connectWiFi();
+  loadConfig();
+
+  // Mantener BOOT 3 segundos al encender para reconfigurar.
+  if (bootHeldForConfig()) {
+    startConfigPortal();
+  }
+
+  // Primera vez: abre portal directamente.
+  if (!config.configured || config.ssid1.length() == 0) {
+    startConfigPortal();
+  }
+
+  // Si ninguna Wi-Fi configurada está disponible, abre el portal.
+  if (!connectWiFi()) {
+    startConfigPortal();
+  }
+
   performStartupSearch();
   lastUpdate = millis();
 }
