@@ -8,10 +8,6 @@
 #include <Preferences.h>
 #include <math.h>
 
-// ======================================================
-// CONFIGURACION GENERAL
-// ======================================================
-
 const int SEARCH_LEVELS = 5;
 const unsigned long UPDATE_INTERVAL = 30000;
 const unsigned long MANUAL_SCREEN_DURATION = 15000;
@@ -24,10 +20,6 @@ const unsigned long PANEL_ROTATION_INTERVAL = 10000;
 const double PASS_NEAR_KM = 10.0;
 const double MAX_CPA_HOURS = 2.0;
 
-// ======================================================
-// COLORES RGB565
-// ======================================================
-
 #define BLACK       0x0000
 #define WHITE       0xFFFF
 #define RED         0xF800
@@ -37,10 +29,6 @@ const double MAX_CPA_HOURS = 2.0;
 #define YELLOW      0xFFE0
 #define GREY        0x8410
 #define DARKGREY    0x4208
-
-// ======================================================
-// WAVESHARE ESP32-C6-LCD-1.47
-// ======================================================
 
 #define LCD_SCK      7
 #define LCD_MOSI     6
@@ -58,10 +46,6 @@ Arduino_DataBus *bus = new Arduino_ESP32SPI(
 Arduino_GFX *gfx = new Arduino_ST7789(
   bus, LCD_RST, 1, true, 172, 320, 34, 0, 34, 0
 );
-
-// ======================================================
-// CONFIGURACION PERSISTENTE
-// ======================================================
 
 Preferences preferences;
 
@@ -84,10 +68,6 @@ const char* CONFIG_AP_SSID = "ADS-B-Radar-Setup";
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
 WebServer webServer(80);
-
-// ======================================================
-// DATOS DE AVIONES
-// ======================================================
 
 struct Aircraft {
   String callsign;
@@ -113,10 +93,6 @@ Aircraft aircraft[MAX_AIRCRAFT];
 int aircraftCount = 0;
 int featuredAircraftIndex = -1;
 
-// ======================================================
-// ESTADOS
-// ======================================================
-
 unsigned long lastUpdate = 0;
 bool baseHasAircraft = false;
 bool hadBaseAircraft = false;
@@ -136,17 +112,12 @@ bool ledState = false;
 unsigned long alertStart = 0;
 unsigned long lastBlink = 0;
 
-// Vista derecha: false = clasica, true = proximidad
 bool showProximityPanel = false;
 unsigned long lastPanelRotation = 0;
 
 String lastRouteCallsign = "";
 String lastOrigin = "";
 String lastDestination = "";
-
-// ======================================================
-// UTILIDADES
-// ======================================================
 
 double degToRad(double deg) { return deg * PI / 180.0; }
 double radToDeg(double rad) { return rad * 180.0 / PI; }
@@ -191,10 +162,6 @@ String formatEta(double minutes) {
   if (m == 0) return String(h) + "h";
   return String(h) + "h" + String(m) + "m";
 }
-
-// ======================================================
-// CPA - MAXIMA APROXIMACION
-// ======================================================
 
 void calculateClosestApproach(Aircraft &a) {
   a.cpaValid = false;
@@ -260,10 +227,6 @@ void chooseFeaturedAircraft() {
   }
 }
 
-// ======================================================
-// PANTALLA / RGB
-// ======================================================
-
 void screenOn() { digitalWrite(LCD_BL, HIGH); }
 void screenOff() { digitalWrite(LCD_BL, LOW); }
 void rgbOn() { rgbLedWrite(RGB_LED, 255, 0, 0); }
@@ -292,10 +255,6 @@ void updateAircraftAlert() {
     if (ledState) rgbOn(); else rgbOff();
   }
 }
-
-// ======================================================
-// PREFERENCES
-// ======================================================
 
 void loadConfig() {
   preferences.begin("adsbradar", true);
@@ -334,10 +293,6 @@ void saveConfig() {
 
   preferences.end();
 }
-
-// ======================================================
-// PORTAL CAUTIVO
-// ======================================================
 
 String htmlEscape(const String &value) {
   String out = value;
@@ -464,10 +419,6 @@ bool bootHeldForConfig() {
   return false;
 }
 
-// ======================================================
-// WIFI
-// ======================================================
-
 bool tryWiFiNetwork(const String &ssid, const String &password) {
   if (ssid.length() == 0) return false;
 
@@ -513,10 +464,6 @@ bool connectWiFi() {
 
   return ok;
 }
-
-// ======================================================
-// ORIGEN / DESTINO
-// ======================================================
 
 void getRoute(Aircraft &a) {
   a.origin = "---";
@@ -582,10 +529,6 @@ void getRoute(Aircraft &a) {
   lastDestination = a.destination;
   http.end();
 }
-
-// ======================================================
-// CONSULTAR AVIONES
-// ======================================================
 
 bool getAircraft(int radiusNM) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -687,10 +630,6 @@ bool getAircraft(int radiusNM) {
   return true;
 }
 
-// ======================================================
-// DIBUJAR AVION
-// ======================================================
-
 void drawPlane(int x, int y, double heading, uint16_t color) {
   double a = degToRad(heading - 90.0);
   double cosA = cos(a);
@@ -710,12 +649,7 @@ void drawPlane(int x, int y, double heading, uint16_t color) {
   gfx->fillCircle(x, y, 1, color);
 }
 
-// ======================================================
-// PANEL DERECHO - VISTA CLASICA
-// ======================================================
-
 void drawClassicPanel(Aircraft &a) {
-  // Etiquetas chicas pero descriptivas; valores grandes.
   gfx->setTextSize(1);
   gfx->setTextColor(WHITE);
   gfx->setCursor(177, 62);
@@ -749,17 +683,12 @@ void drawClassicPanel(Aircraft &a) {
   gfx->print("kmh");
 }
 
-// ======================================================
-// PANEL DERECHO - VISTA PROXIMIDAD
-// ======================================================
-
 void drawProximityPanel(Aircraft &a) {
   gfx->setTextColor(WHITE);
 
   if (a.cpaValid && a.approaching) {
     bool passesNear = a.closestApproachKm <= PASS_NEAR_KM;
 
-    // El titulo queda mas chico para no comerse todo el panel.
     gfx->setTextSize(1);
     gfx->setCursor(177, 66);
 
@@ -813,10 +742,6 @@ void drawProximityPanel(Aircraft &a) {
   }
 }
 
-// ======================================================
-// DIBUJAR RADAR
-// ======================================================
-
 void drawRadar() {
   gfx->fillScreen(BLACK);
 
@@ -853,12 +778,39 @@ void drawRadar() {
 
     if (i < 5 && a.callsign.length() > 0) {
       String label = a.callsign;
-      if (label.length() > 6) label = label.substring(0, 6);
+      if (label.length() > 7) label = label.substring(0, 7);
 
-      int labelX = x + 5;
-      int labelY = y - 10;
-      if (labelX > 130) labelX = x - 35;
-      if (labelY < 0) labelY = y + 5;
+      // Fuente clasica de Arduino_GFX en textSize(1): aprox. 6 px por caracter.
+      const int charWidth = 6;
+      const int textHeight = 8;
+      const int radarLeft = 3;
+      const int radarRight = 164;
+      const int radarTop = 3;
+      const int radarBottom = 168;
+
+      int labelWidth = label.length() * charWidth;
+
+      // Preferimos poner la etiqueta a la derecha del avion.
+      int labelX = x + 6;
+      int labelY = y - 11;
+
+      // Si no entra a la derecha, la ponemos completa a la izquierda.
+      if (labelX + labelWidth > radarRight) {
+        labelX = x - labelWidth - 6;
+      }
+
+      // Clamp final para garantizar que nunca salga del sector radar.
+      if (labelX < radarLeft) labelX = radarLeft;
+      if (labelX + labelWidth > radarRight) labelX = radarRight - labelWidth;
+
+      // Si arriba se corta, baja debajo del avion.
+      if (labelY < radarTop) {
+        labelY = y + 6;
+      }
+
+      if (labelY + textHeight > radarBottom) {
+        labelY = radarBottom - textHeight;
+      }
 
       gfx->setTextSize(1);
       gfx->setTextColor(color);
@@ -921,10 +873,6 @@ void updatePanelRotation() {
   }
 }
 
-// ======================================================
-// CAMBIAR AVION DESTACADO CON BOOT
-// ======================================================
-
 void cycleFeaturedAircraft() {
   if (aircraftCount <= 1) return;
 
@@ -935,19 +883,13 @@ void cycleFeaturedAircraft() {
     if (featuredAircraftIndex >= aircraftCount) featuredAircraftIndex = 0;
   }
 
-  // Buscamos la ruta del nuevo avion seleccionado.
   getRoute(aircraft[featuredAircraftIndex]);
 
-  // Cada cambio manual vuelve primero a la vista clasica.
   showProximityPanel = false;
   lastPanelRotation = millis();
 
   drawRadar();
 }
-
-// ======================================================
-// CONSULTA NORMAL
-// ======================================================
 
 void performBaseSearch() {
   if (!getAircraft(config.baseRadiusNM)) return;
@@ -978,10 +920,6 @@ void performBaseSearch() {
   gfx->fillScreen(BLACK);
   screenOff();
 }
-
-// ======================================================
-// BUSQUEDA INICIAL
-// ======================================================
 
 void performStartupSearch() {
   startupMode = true;
@@ -1040,10 +978,6 @@ void updateStartupMode() {
   lastUpdate = millis();
 }
 
-// ======================================================
-// BUSQUEDA MANUAL CON BOOT
-// ======================================================
-
 void performManualSearch() {
   manualLevel++;
   if (manualLevel > SEARCH_LEVELS) manualLevel = 1;
@@ -1084,12 +1018,9 @@ void updateButton() {
     if (millis() - lastButtonTime > 250) {
       lastButtonTime = millis();
 
-      // Si hay varios vuelos visibles, BOOT cambia al siguiente.
       if (aircraftCount > 1 && (baseHasAircraft || manualMode)) {
         cycleFeaturedAircraft();
       }
-      // Si no hay vuelos en el radio base, conserva la funcion
-      // anterior de ampliar el rango manual.
       else if (!startupMode && !baseHasAircraft) {
         performManualSearch();
       }
@@ -1114,10 +1045,6 @@ void updateManualTimeout() {
     screenOff();
   }
 }
-
-// ======================================================
-// SETUP
-// ======================================================
 
 void setup() {
   Serial.begin(115200);
@@ -1146,10 +1073,6 @@ void setup() {
   performStartupSearch();
   lastUpdate = millis();
 }
-
-// ======================================================
-// LOOP
-// ======================================================
 
 void loop() {
   updateAircraftAlert();
