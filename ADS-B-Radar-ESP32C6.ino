@@ -715,25 +715,22 @@ void drawPlane(int x, int y, double heading, uint16_t color) {
 // ======================================================
 
 void drawClassicPanel(Aircraft &a) {
-  // Mantiene el aspecto anterior: distancia, altura y velocidad.
+  // Etiquetas chicas pero descriptivas; valores grandes.
   gfx->setTextSize(1);
-  gfx->setTextColor(GREY);
-  gfx->setCursor(177, 64);
-  gfx->print("DIST");
+  gfx->setTextColor(WHITE);
+  gfx->setCursor(177, 62);
+  gfx->print("DISTANCIA");
 
   gfx->setTextSize(2);
-  gfx->setTextColor(WHITE);
-  gfx->setCursor(177, 74);
+  gfx->setCursor(177, 73);
   gfx->print(a.distanceKm, 1);
   gfx->print("km");
 
   gfx->setTextSize(1);
-  gfx->setTextColor(GREY);
-  gfx->setCursor(177, 98);
-  gfx->print("ALT");
+  gfx->setCursor(177, 97);
+  gfx->print("ALTURA");
 
   gfx->setTextSize(2);
-  gfx->setTextColor(WHITE);
   gfx->setCursor(177, 108);
   if (a.altitude > 0) {
     gfx->print(a.altitude, 0);
@@ -743,13 +740,11 @@ void drawClassicPanel(Aircraft &a) {
   }
 
   gfx->setTextSize(1);
-  gfx->setTextColor(GREY);
   gfx->setCursor(177, 132);
-  gfx->print("VEL");
+  gfx->print("VELOCIDAD");
 
   gfx->setTextSize(2);
-  gfx->setTextColor(WHITE);
-  gfx->setCursor(177, 142);
+  gfx->setCursor(177, 143);
   gfx->print(a.speed, 0);
   gfx->print("kmh");
 }
@@ -759,60 +754,60 @@ void drawClassicPanel(Aircraft &a) {
 // ======================================================
 
 void drawProximityPanel(Aircraft &a) {
-  // Todo blanco y con fuente mas grande que la version anterior.
   gfx->setTextColor(WHITE);
 
   if (a.cpaValid && a.approaching) {
     bool passesNear = a.closestApproachKm <= PASS_NEAR_KM;
 
-    gfx->setTextSize(2);
+    // El titulo queda mas chico para no comerse todo el panel.
+    gfx->setTextSize(1);
     gfx->setCursor(177, 66);
 
     if (passesNear) {
-      gfx->print("PASA");
-      gfx->setCursor(177, 84);
-      gfx->print("CERCA");
+      gfx->print("PASA CERCA");
     } else {
-      gfx->print("APROX");
+      gfx->print("APROXIMACION");
     }
 
     gfx->setTextSize(1);
-    gfx->setCursor(177, 105);
-    gfx->print("EN");
+    gfx->setCursor(177, 86);
+    gfx->print("TIEMPO");
 
     gfx->setTextSize(2);
-    gfx->setCursor(177, 116);
+    gfx->setCursor(177, 97);
     gfx->print(formatEta(a.minutesToClosest));
 
     gfx->setTextSize(1);
-    gfx->setCursor(177, 140);
-    gfx->print("MIN DIST");
+    gfx->setCursor(177, 124);
+    gfx->print("DIST. MINIMA");
 
     gfx->setTextSize(2);
-    gfx->setCursor(177, 150);
+    gfx->setCursor(177, 136);
     gfx->print(a.closestApproachKm, 1);
     gfx->print("km");
 
   } else {
-    gfx->setTextSize(2);
-    gfx->setCursor(177, 78);
+    gfx->setTextSize(1);
+    gfx->setCursor(177, 72);
 
     if (a.cpaValid) {
-      gfx->print("SE");
-      gfx->setCursor(177, 98);
-      gfx->print("ALEJA");
+      gfx->print("ESTADO");
+      gfx->setTextSize(2);
+      gfx->setCursor(177, 88);
+      gfx->print("SE ALEJA");
     } else {
-      gfx->print("SIN");
-      gfx->setCursor(177, 98);
-      gfx->print("PROY.");
+      gfx->print("ESTADO");
+      gfx->setTextSize(2);
+      gfx->setCursor(177, 88);
+      gfx->print("SIN PROY.");
     }
 
     gfx->setTextSize(1);
-    gfx->setCursor(177, 128);
-    gfx->print("DIST ACTUAL");
+    gfx->setCursor(177, 122);
+    gfx->print("DIST. ACTUAL");
 
     gfx->setTextSize(2);
-    gfx->setCursor(177, 140);
+    gfx->setCursor(177, 136);
     gfx->print(a.distanceKm, 1);
     gfx->print("km");
   }
@@ -894,7 +889,6 @@ void drawRadar() {
 
   Aircraft &a = aircraft[featuredAircraftIndex];
 
-  // Cabecera comun a ambas vistas.
   gfx->setTextColor(YELLOW);
   gfx->setTextSize(2);
   gfx->setCursor(177, 18);
@@ -918,7 +912,6 @@ void drawRadar() {
 }
 
 void updatePanelRotation() {
-  // Solo rota cuando realmente hay algo visible en pantalla.
   if (aircraftCount <= 0 || featuredAircraftIndex < 0) return;
 
   if (millis() - lastPanelRotation >= PANEL_ROTATION_INTERVAL) {
@@ -926,6 +919,30 @@ void updatePanelRotation() {
     showProximityPanel = !showProximityPanel;
     drawRadar();
   }
+}
+
+// ======================================================
+// CAMBIAR AVION DESTACADO CON BOOT
+// ======================================================
+
+void cycleFeaturedAircraft() {
+  if (aircraftCount <= 1) return;
+
+  if (featuredAircraftIndex < 0 || featuredAircraftIndex >= aircraftCount) {
+    featuredAircraftIndex = 0;
+  } else {
+    featuredAircraftIndex++;
+    if (featuredAircraftIndex >= aircraftCount) featuredAircraftIndex = 0;
+  }
+
+  // Buscamos la ruta del nuevo avion seleccionado.
+  getRoute(aircraft[featuredAircraftIndex]);
+
+  // Cada cambio manual vuelve primero a la vista clasica.
+  showProximityPanel = false;
+  lastPanelRotation = millis();
+
+  drawRadar();
 }
 
 // ======================================================
@@ -945,8 +962,6 @@ void performBaseSearch() {
     if (!hadBaseAircraft) startAircraftAlert();
 
     hadBaseAircraft = true;
-
-    // Cada nueva consulta vuelve a la vista clasica primero.
     showProximityPanel = false;
     lastPanelRotation = millis();
 
@@ -1069,7 +1084,13 @@ void updateButton() {
     if (millis() - lastButtonTime > 250) {
       lastButtonTime = millis();
 
-      if (!startupMode && !baseHasAircraft) {
+      // Si hay varios vuelos visibles, BOOT cambia al siguiente.
+      if (aircraftCount > 1 && (baseHasAircraft || manualMode)) {
+        cycleFeaturedAircraft();
+      }
+      // Si no hay vuelos en el radio base, conserva la funcion
+      // anterior de ampliar el rango manual.
+      else if (!startupMode && !baseHasAircraft) {
         performManualSearch();
       }
     }
