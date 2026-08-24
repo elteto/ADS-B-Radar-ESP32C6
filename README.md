@@ -2,41 +2,93 @@
 
 Radar de vuelos cercano para la placa **Waveshare ESP32-C6-LCD-1.47**.
 
-El proyecto consulta datos ADS-B por Internet, muestra los vuelos cercanos en un pequeño radar gráfico y presenta información del avión más próximo directamente en la pantalla integrada.
+El proyecto consulta datos ADS-B por Internet, muestra los vuelos cercanos en un radar gráfico y presenta información del avión más próximo directamente en la pantalla integrada.
+
+La configuración de Wi-Fi, coordenadas y radio base se realiza desde un **portal cautivo**, por lo que no es necesario guardar claves ni ubicación dentro del código fuente.
 
 ## Funciones principales
 
 - Radar gráfico en pantalla **ST7789 de 1.47"** en orientación horizontal.
-- Consulta de aeronaves cercanas usando **Airplanes.live**.
+- Consulta de aeronaves cercanas mediante **Airplanes.live**.
 - Cálculo local de distancia, posición relativa, rumbo, altitud y velocidad.
 - El avión más cercano se destaca en amarillo.
-- Visualización de callsign junto a los vuelos más próximos.
+- Callsign junto a los vuelos más próximos.
 - Consulta de **origen y destino** del vuelo más cercano mediante **ADSBDB**.
-- Soporte para múltiples redes Wi-Fi.
-- Reconexión automática intentando las redes configuradas.
-- Uso del botón **BOOT** como control de búsqueda manual.
-- Uso del LED RGB integrado como alerta.
-- Apagado automático del backlight cuando no hay vuelos próximos.
+- Hasta **3 redes Wi-Fi configurables** desde el portal cautivo.
+- Latitud y longitud configurables sin recompilar.
+- Radio base configurable desde el navegador.
+- Configuración persistente en la memoria flash del ESP32 mediante `Preferences`.
+- Botón **BOOT** para búsquedas manuales por rangos.
+- Mantener **BOOT durante 3 segundos al encender** para volver a abrir el portal de configuración.
+- LED RGB integrado como alerta de nuevos vuelos.
+- Apagado automático del backlight cuando no hay vuelos en el radio base.
+- Búsqueda inicial automática en rangos crecientes.
+
+## Portal cautivo de configuración
+
+En el primer arranque, como todavía no hay una red Wi-Fi configurada, el ESP32 crea automáticamente el punto de acceso:
+
+```text
+ADS-B-Radar-Setup
+```
+
+La pantalla muestra el nombre de la red y la dirección:
+
+```text
+192.168.4.1
+```
+
+Conectate a `ADS-B-Radar-Setup` desde el teléfono o una computadora. El sistema utiliza DNS cautivo para intentar abrir automáticamente la página de configuración. Si el navegador no la abre solo, ingresá manualmente:
+
+```text
+http://192.168.4.1
+```
+
+Desde allí se puede configurar:
+
+- Wi-Fi principal y contraseña;
+- segunda red Wi-Fi opcional;
+- tercera red Wi-Fi / hotspot opcional;
+- latitud del radar;
+- longitud del radar;
+- radio base en millas náuticas.
+
+Al presionar **Guardar y reiniciar**, los datos se almacenan en la memoria flash del ESP32 y el equipo se reinicia.
+
+### Volver a abrir el portal
+
+Para cambiar Wi-Fi, ubicación o radio sin modificar el sketch:
+
+1. apagá o reiniciá el ESP32;
+2. mantené presionado **BOOT** durante aproximadamente 3 segundos mientras arranca;
+3. la pantalla mostrará `MODO CONFIG`;
+4. conectate nuevamente a `ADS-B-Radar-Setup`.
+
+Si ninguna de las redes Wi-Fi guardadas está disponible, el dispositivo también entra automáticamente al portal cautivo.
+
+## Seguridad de las credenciales
+
+El repositorio **no contiene claves Wi-Fi reales**.
+
+Las credenciales introducidas en el portal se guardan localmente en la NVS/flash del ESP32 mediante `Preferences`. No es necesario escribir SSID, contraseña, latitud ni longitud dentro del `.ino`.
 
 ## Comportamiento del radar
 
 ### Radio base
 
-El radar tiene un radio base configurable:
+El radio base se define desde el portal cautivo.
 
-```cpp
-const int BASE_RADIUS_NM = 15;
-```
+Solamente los vuelos detectados dentro de este radio mantienen la pantalla encendida de manera permanente.
 
-Solamente los vuelos detectados dentro de este radio mantienen la pantalla encendida de forma permanente.
+Por ejemplo, un radio base de `15 NM` equivale aproximadamente a `28 km`.
 
-Con el valor por defecto, `15 NM` son aproximadamente `28 km`.
-
-El ESP32 actualiza la búsqueda normal cada 30 segundos.
+El radar normal consulta la API cada 30 segundos.
 
 ### Búsqueda inicial
 
-Al arrancar, el dispositivo realiza automáticamente una búsqueda escalonada:
+Después de conectarse al Wi-Fi, el dispositivo realiza automáticamente una búsqueda escalonada.
+
+Si el radio base configurado es `15 NM`, los niveles son:
 
 1. 15 NM
 2. 30 NM
@@ -44,11 +96,13 @@ Al arrancar, el dispositivo realiza automáticamente una búsqueda escalonada:
 4. 120 NM
 5. 240 NM
 
-Se detiene en el primer rango donde encuentra aeronaves.
+Se detiene en el **primer rango donde encuentra al menos una aeronave**.
 
-Si encuentra vuelos, muestra el radar durante 60 segundos y después vuelve al modo normal de 15 NM.
+Si encuentra vuelos, muestra ese radar durante **60 segundos**. Luego vuelve automáticamente al funcionamiento normal usando exclusivamente el radio base.
 
-Si no encuentra ningún vuelo, apaga la pantalla y continúa funcionando en segundo plano.
+Si no encuentra ningún vuelo en los rangos disponibles, apaga la pantalla y continúa funcionando en segundo plano.
+
+El radio consultado nunca supera los `250 NM`.
 
 ### Pantalla apagada
 
@@ -59,11 +113,13 @@ Cuando no hay aviones dentro del radio base:
 - el ESP32 sigue conectado al Wi-Fi;
 - continúa consultando vuelos cada 30 segundos.
 
-En cuanto aparece un avión dentro del radio base, la pantalla vuelve a encenderse automáticamente.
+En cuanto aparece una aeronave dentro del radio base, la pantalla vuelve a encenderse automáticamente.
 
 ## Botón BOOT
 
-Cuando la pantalla está apagada, el botón **BOOT** permite explorar manualmente radios cada vez mayores.
+Una vez terminado el modo de búsqueda inicial, si la pantalla está apagada y no hay vuelos dentro del radio base, **BOOT** permite explorar manualmente radios progresivamente mayores.
+
+Con radio base de 15 NM:
 
 | Pulsación | Radio |
 |---|---:|
@@ -74,19 +130,26 @@ Cuando la pantalla está apagada, el botón **BOOT** permite explorar manualment
 | 5 | 240 NM |
 | 6 | vuelve a 15 NM |
 
-Cada búsqueda manual mantiene la pantalla encendida durante 15 segundos.
+Cada pulsación reinicia un temporizador de **15 segundos**.
 
-Si hay aviones en el rango seleccionado, se muestran normalmente en el radar. Los vuelos encontrados fuera del radio base **no mantienen la pantalla encendida** después del timeout manual.
+Si hay aviones en el rango seleccionado, se muestran normalmente en el radar. Los vuelos encontrados fuera del radio base **no mantienen la pantalla encendida** cuando termina el modo manual.
+
+### BOOT al encender
+
+BOOT tiene una segunda función:
+
+- pulsación normal durante el uso: ampliar el rango manual;
+- mantenerlo presionado unos 3 segundos al arrancar: abrir el portal cautivo de configuración.
 
 ## Alerta RGB
 
 Cuando el radar pasa de no tener vuelos a detectar al menos uno dentro del radio base:
 
 - la pantalla se enciende;
-- el LED RGB integrado comienza a parpadear en rojo;
+- el LED RGB integrado parpadea en rojo;
 - la alerta dura 30 segundos.
 
-Después, el LED se apaga pero la pantalla continúa encendida mientras haya vuelos en el radio base.
+Después el LED se apaga, pero la pantalla permanece encendida mientras continúe habiendo vuelos dentro del radio base.
 
 ## Información mostrada
 
@@ -115,7 +178,13 @@ VEL
 790kmh
 ```
 
-En la mitad izquierda se muestra un radar circular con los puntos cardinales, la posición del observador en el centro, la posición relativa de las aeronaves, la orientación aproximada de cada avión según su rumbo y los callsigns de los primeros vuelos.
+En la mitad izquierda se muestra un radar circular con:
+
+- Norte, Sur, Este y Oeste;
+- posición del observador en el centro;
+- posición relativa de las aeronaves;
+- orientación aproximada según `track`;
+- callsigns de los primeros vuelos.
 
 ## Hardware
 
@@ -147,54 +216,28 @@ Instalar desde Arduino IDE:
 - **Arduino_GFX**
 - **ArduinoJson**
 
-También se utilizan librerías incluidas en el core ESP32:
+Las siguientes forman parte del core ESP32 utilizado por Arduino:
 
 - `WiFi`
 - `WiFiClientSecure`
 - `HTTPClient`
+- `WebServer`
+- `DNSServer`
+- `Preferences`
 
 ## Configuración de Arduino IDE
 
-Una configuración típica es:
+Configuración típica:
 
 - Board: `ESP32C6 Dev Module`
 - USB CDC On Boot: `Enabled`
 - Serial Monitor: `115200 baud`
 
-## Configuración Wi-Fi
-
-Por seguridad, el repositorio **no contiene claves Wi-Fi reales**.
-
-Editá esta sección del `.ino`:
-
-```cpp
-WifiNetwork wifiNetworks[] = {
-  { "TU_WIFI_1", "TU_CLAVE_1" },
-  { "TU_WIFI_2", "TU_CLAVE_2" },
-  { "TU_HOTSPOT", "TU_CLAVE_3" }
-};
-```
-
-Podés agregar o quitar redes libremente. El dispositivo intentará conectarse a cada una hasta encontrar una disponible.
-
-## Ubicación del radar
-
-También hay que configurar la posición desde donde se observa el tráfico:
-
-```cpp
-const double MY_LAT = -31.380000;
-const double MY_LON = -57.980000;
-```
-
-Cambiá esos valores por tu latitud y longitud.
-
 ## APIs utilizadas
 
 ### Airplanes.live
 
-Se utiliza para obtener aeronaves cercanas según latitud, longitud y radio de búsqueda.
-
-El proyecto consulta:
+Obtiene aeronaves cercanas según latitud, longitud y radio:
 
 ```text
 https://api.airplanes.live/v2/point/LAT/LON/RADIO
@@ -202,16 +245,9 @@ https://api.airplanes.live/v2/point/LAT/LON/RADIO
 
 ### ADSBDB
 
-Se utiliza para intentar obtener la ruta asociada al callsign del vuelo más cercano y mostrar códigos de aeropuerto de origen y destino cuando están disponibles.
+Se utiliza para intentar obtener la ruta asociada al callsign del avión más cercano y mostrar aeropuerto de origen y destino.
 
-La ruta puede no existir para todos los vuelos.
-
-## Notas
-
-- El proyecto depende de una conexión Wi-Fi con acceso a Internet.
-- Los datos mostrados dependen de la cobertura ADS-B disponible en las APIs utilizadas.
-- Origen y destino pueden faltar o estar desactualizados en determinados vuelos.
-- El radio máximo utilizado por el proyecto es de 240 NM.
+La ruta puede no estar disponible para todos los vuelos.
 
 ## Archivo principal
 
@@ -219,19 +255,54 @@ La ruta puede no existir para todos los vuelos.
 ADS-B-Radar-ESP32C6.ino
 ```
 
-Abrilo en Arduino IDE, configurá Wi-Fi y ubicación, compilá y cargalo en la placa.
+Abrilo en Arduino IDE, instalá las librerías requeridas, compilá y cargalo en la placa. La configuración del dispositivo se hace después desde el portal cautivo.
+
+## Flujo de funcionamiento
+
+```text
+ENCENDIDO
+   |
+   +-- BOOT mantenido 3 s? -- SI --> Portal cautivo
+   |
+   +-- No hay configuracion? ------> Portal cautivo
+   |
+   +-- Intenta Wi-Fi 1 / 2 / 3
+           |
+           +-- ninguna conecta ----> Portal cautivo
+           |
+           +-- conectado
+                  |
+                  +-- busqueda inicial por rangos
+                  |
+                  +-- modo normal en radio base
+                          |
+                          +-- hay vuelos --> LCD ON
+                          |
+                          +-- no hay -----> LCD OFF
+                                             |
+                                             +-- BOOT --> busqueda manual
+```
+
+## Notas
+
+- El proyecto necesita conexión a Internet.
+- La calidad de los datos depende de la cobertura ADS-B disponible en las APIs.
+- Origen y destino pueden faltar o estar desactualizados en algunos vuelos.
+- El límite de búsqueda utilizado es 250 NM.
+- Las credenciales se guardan en la flash local del dispositivo, no en GitHub.
 
 ## Estado
 
 Proyecto en desarrollo.
 
-Ideas para futuras versiones:
+Posibles mejoras futuras:
 
+- selección de ubicación usando el navegador del teléfono;
+- página de estado del radar dentro del portal;
+- botón para borrar configuración;
 - alternar automáticamente entre varios vuelos;
+- caché de rutas más completa;
 - mostrar tipo de aeronave;
-- mejorar iconos y orientación de los aviones;
-- caché de rutas;
-- configuración desde una interfaz web;
 - hora de última actualización;
 - intensidad de señal Wi-Fi;
 - filtros por altitud o distancia.
