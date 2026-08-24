@@ -19,12 +19,9 @@ const unsigned long STARTUP_DISPLAY_DURATION = 60000;
 const unsigned long ALERT_DURATION = 30000;
 const unsigned long BLINK_INTERVAL = 400;
 const unsigned long CONFIG_BUTTON_HOLD = 3000;
+const unsigned long PANEL_ROTATION_INTERVAL = 10000;
 
-// Se considera que un avion "pasa cerca" si la trayectoria
-// proyectada llega a menos de esta distancia.
 const double PASS_NEAR_KM = 10.0;
-
-// No se muestran predicciones a mas de 2 horas.
 const double MAX_CPA_HOURS = 2.0;
 
 // ======================================================
@@ -98,7 +95,6 @@ struct Aircraft {
   String type;
   String origin;
   String destination;
-
   double lat;
   double lon;
   double distanceKm;
@@ -106,7 +102,6 @@ struct Aircraft {
   double altitude;
   double speed;
   double track;
-
   bool cpaValid;
   bool approaching;
   double closestApproachKm;
@@ -116,9 +111,6 @@ struct Aircraft {
 #define MAX_AIRCRAFT 30
 Aircraft aircraft[MAX_AIRCRAFT];
 int aircraftCount = 0;
-
-// Avion destacado: el que proyecta pasar mas cerca.
-// Si ninguno se aproxima, se usa el mas cercano actual.
 int featuredAircraftIndex = -1;
 
 // ======================================================
@@ -144,6 +136,10 @@ bool ledState = false;
 unsigned long alertStart = 0;
 unsigned long lastBlink = 0;
 
+// Vista derecha: false = clasica, true = proximidad
+bool showProximityPanel = false;
+unsigned long lastPanelRotation = 0;
+
 String lastRouteCallsign = "";
 String lastOrigin = "";
 String lastDestination = "";
@@ -152,13 +148,8 @@ String lastDestination = "";
 // UTILIDADES
 // ======================================================
 
-double degToRad(double deg) {
-  return deg * PI / 180.0;
-}
-
-double radToDeg(double rad) {
-  return rad * 180.0 / PI;
-}
+double degToRad(double deg) { return deg * PI / 180.0; }
+double radToDeg(double rad) { return rad * 180.0 / PI; }
 
 double getDistanceKm(double lat1, double lon1, double lat2, double lon2) {
   const double R = 6371.0;
@@ -170,8 +161,7 @@ double getDistanceKm(double lat1, double lon1, double lat2, double lon2) {
     cos(degToRad(lat1)) * cos(degToRad(lat2)) *
     sin(dLon / 2.0) * sin(dLon / 2.0);
 
-  double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
-  return R * c;
+  return R * 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
 }
 
 double getBearing(double lat1, double lon1, double lat2, double lon2) {
@@ -182,8 +172,7 @@ double getBearing(double lat1, double lon1, double lat2, double lon2) {
   double y = sin(dLon) * cos(p2);
   double x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dLon);
 
-  double brg = radToDeg(atan2(y, x));
-  return fmod(brg + 360.0, 360.0);
+  return fmod(radToDeg(atan2(y, x)) + 360.0, 360.0);
 }
 
 int radiusForLevel(int level) {
@@ -194,28 +183,17 @@ int radiusForLevel(int level) {
 
 String formatEta(double minutes) {
   if (minutes < 0) return "---";
-
   int totalMinutes = (int)round(minutes);
+  if (totalMinutes < 60) return String(totalMinutes) + "m";
 
-  if (totalMinutes < 60) {
-    return String(totalMinutes) + "m";
-  }
-
-  int hours = totalMinutes / 60;
-  int mins = totalMinutes % 60;
-
-  if (mins == 0) return String(hours) + "h";
-  return String(hours) + "h" + String(mins) + "m";
+  int h = totalMinutes / 60;
+  int m = totalMinutes % 60;
+  if (m == 0) return String(h) + "h";
+  return String(h) + "h" + String(m) + "m";
 }
 
 // ======================================================
-// MAXIMA APROXIMACION / TIEMPO ESTIMADO
-// ======================================================
-//
-// Se proyecta la posicion actual del avion en un plano local.
-// Con la velocidad y el track se calcula el punto futuro que
-// minimiza la distancia al radar (CPA: Closest Point of Approach).
-// La estimacion supone rumbo y velocidad constantes.
+// CPA - MAXIMA APROXIMACION
 // ======================================================
 
 void calculateClosestApproach(Aircraft &a) {
@@ -229,26 +207,19 @@ void calculateClosestApproach(Aircraft &a) {
   double bearingRad = degToRad(a.bearing);
   double trackRad = degToRad(a.track);
 
-  // Posicion relativa: X este, Y norte.
   double rx = a.distanceKm * sin(bearingRad);
   double ry = a.distanceKm * cos(bearingRad);
 
-  // Velocidad en km/h.
   double vx = a.speed * sin(trackRad);
   double vy = a.speed * cos(trackRad);
 
   double v2 = vx * vx + vy * vy;
   if (v2 < 1.0) return;
 
-  // r(t) = r + v*t; t que minimiza |r(t)|.
   double tHours = -((rx * vx) + (ry * vy)) / v2;
-
   a.cpaValid = true;
 
-  if (tHours <= 0.0 || tHours > MAX_CPA_HOURS) {
-    a.approaching = false;
-    return;
-  }
+  if (tHours <= 0.0 || tHours > MAX_CPA_HOURS) return;
 
   double cx = rx + vx * tHours;
   double cy = ry + vy * tHours;
@@ -260,32 +231,26 @@ void calculateClosestApproach(Aircraft &a) {
 
 void chooseFeaturedAircraft() {
   featuredAircraftIndex = -1;
-
   if (aircraftCount <= 0) return;
 
-  double bestClosest = 1e9;
+  double bestCPA = 1e9;
   double bestTime = 1e9;
 
-  // Primero elegimos el que va a pasar mas cerca.
   for (int i = 0; i < aircraftCount; i++) {
     Aircraft &a = aircraft[i];
-
     if (!a.cpaValid || !a.approaching) continue;
 
-    if (a.closestApproachKm < bestClosest - 0.1 ||
-        (fabs(a.closestApproachKm - bestClosest) <= 0.1 &&
+    if (a.closestApproachKm < bestCPA - 0.1 ||
+        (fabs(a.closestApproachKm - bestCPA) <= 0.1 &&
          a.minutesToClosest < bestTime)) {
-
-      bestClosest = a.closestApproachKm;
+      bestCPA = a.closestApproachKm;
       bestTime = a.minutesToClosest;
       featuredAircraftIndex = i;
     }
   }
 
-  // Si ninguno se aproxima, mostramos el mas cercano actual.
   if (featuredAircraftIndex < 0) {
     double bestDistance = 1e9;
-
     for (int i = 0; i < aircraftCount; i++) {
       if (aircraft[i].distanceKm < bestDistance) {
         bestDistance = aircraft[i].distanceKm;
@@ -296,24 +261,13 @@ void chooseFeaturedAircraft() {
 }
 
 // ======================================================
-// PANTALLA Y RGB
+// PANTALLA / RGB
 // ======================================================
 
-void screenOn() {
-  digitalWrite(LCD_BL, HIGH);
-}
-
-void screenOff() {
-  digitalWrite(LCD_BL, LOW);
-}
-
-void rgbOn() {
-  rgbLedWrite(RGB_LED, 255, 0, 0);
-}
-
-void rgbOff() {
-  rgbLedWrite(RGB_LED, 0, 0, 0);
-}
+void screenOn() { digitalWrite(LCD_BL, HIGH); }
+void screenOff() { digitalWrite(LCD_BL, LOW); }
+void rgbOn() { rgbLedWrite(RGB_LED, 255, 0, 0); }
+void rgbOff() { rgbLedWrite(RGB_LED, 0, 0, 0); }
 
 void startAircraftAlert() {
   alertBlinking = true;
@@ -335,9 +289,7 @@ void updateAircraftAlert() {
   if (millis() - lastBlink >= BLINK_INTERVAL) {
     lastBlink = millis();
     ledState = !ledState;
-
-    if (ledState) rgbOn();
-    else rgbOff();
+    if (ledState) rgbOn(); else rgbOff();
   }
 }
 
@@ -354,7 +306,6 @@ void loadConfig() {
   config.pass2 = preferences.getString("pass2", "");
   config.ssid3 = preferences.getString("ssid3", "");
   config.pass3 = preferences.getString("pass3", "");
-
   config.latitude = preferences.getDouble("lat", -31.380000);
   config.longitude = preferences.getDouble("lon", -57.980000);
   config.baseRadiusNM = preferences.getInt("radius", 15);
@@ -364,7 +315,6 @@ void loadConfig() {
 
   if (config.baseRadiusNM < 1) config.baseRadiusNM = 15;
   if (config.baseRadiusNM > 250) config.baseRadiusNM = 250;
-
   displayedRadiusNM = config.baseRadiusNM;
 }
 
@@ -377,7 +327,6 @@ void saveConfig() {
   preferences.putString("pass2", config.pass2);
   preferences.putString("ssid3", config.ssid3);
   preferences.putString("pass3", config.pass3);
-
   preferences.putDouble("lat", config.latitude);
   preferences.putDouble("lon", config.longitude);
   preferences.putInt("radius", config.baseRadiusNM);
@@ -404,45 +353,32 @@ String buildConfigPage() {
   html.reserve(7000);
 
   html += "<!DOCTYPE html><html lang='es'><head>";
-  html += "<meta charset='utf-8'>";
-  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-  html += "<title>ADS-B Radar Setup</title>";
-  html += "<style>";
-  html += "body{font-family:Arial,sans-serif;background:#101318;color:#eee;margin:0;padding:20px}";
+  html += "<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>ADS-B Radar Setup</title><style>";
+  html += "body{font-family:Arial;background:#101318;color:#eee;margin:0;padding:20px}";
   html += ".card{max-width:520px;margin:auto;background:#1b2028;padding:22px;border-radius:14px}";
-  html += "h1{font-size:24px;margin:0 0 8px;color:#4dd0e1}";
-  html += "p{color:#aeb8c4;line-height:1.45}";
-  html += "label{display:block;margin-top:14px;margin-bottom:5px;font-weight:bold}";
+  html += "h1{color:#4dd0e1}label{display:block;margin-top:14px;margin-bottom:5px;font-weight:bold}";
   html += "input{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;border:1px solid #3b4552;background:#0e1116;color:#fff;font-size:16px}";
   html += ".grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}";
   html += "button{width:100%;margin-top:22px;padding:14px;border:0;border-radius:9px;background:#00acc1;color:white;font-size:17px;font-weight:bold}";
-  html += ".small{font-size:13px;color:#8794a3}";
-  html += "@media(max-width:520px){.grid{grid-template-columns:1fr}}";
-  html += "</style></head><body><div class='card'>";
+  html += ".small{font-size:13px;color:#8794a3}@media(max-width:520px){.grid{grid-template-columns:1fr}}";
+  html += "</style></head><body><div class='card'><h1>ADS-B Radar</h1>";
+  html += "<p>Configura Wi-Fi, ubicacion y radio base.</p><form method='POST' action='/save'>";
 
-  html += "<h1>ADS-B Radar</h1>";
-  html += "<p>Configura hasta tres redes Wi-Fi, la ubicacion del radar y el radio base.</p>";
-  html += "<form method='POST' action='/save'>";
-
-  html += "<label>Wi-Fi 1</label><input name='ssid1' value='" + htmlEscape(config.ssid1) + "' placeholder='SSID principal'>";
-  html += "<label>Clave Wi-Fi 1</label><input type='password' name='pass1' value='" + htmlEscape(config.pass1) + "' placeholder='Clave'>";
-
-  html += "<label>Wi-Fi 2</label><input name='ssid2' value='" + htmlEscape(config.ssid2) + "' placeholder='SSID opcional'>";
-  html += "<label>Clave Wi-Fi 2</label><input type='password' name='pass2' value='" + htmlEscape(config.pass2) + "' placeholder='Clave'>";
-
-  html += "<label>Wi-Fi 3</label><input name='ssid3' value='" + htmlEscape(config.ssid3) + "' placeholder='Hotspot opcional'>";
-  html += "<label>Clave Wi-Fi 3</label><input type='password' name='pass3' value='" + htmlEscape(config.pass3) + "' placeholder='Clave'>";
+  html += "<label>Wi-Fi 1</label><input name='ssid1' value='" + htmlEscape(config.ssid1) + "'>";
+  html += "<label>Clave Wi-Fi 1</label><input type='password' name='pass1' value='" + htmlEscape(config.pass1) + "'>";
+  html += "<label>Wi-Fi 2</label><input name='ssid2' value='" + htmlEscape(config.ssid2) + "'>";
+  html += "<label>Clave Wi-Fi 2</label><input type='password' name='pass2' value='" + htmlEscape(config.pass2) + "'>";
+  html += "<label>Wi-Fi 3</label><input name='ssid3' value='" + htmlEscape(config.ssid3) + "'>";
+  html += "<label>Clave Wi-Fi 3</label><input type='password' name='pass3' value='" + htmlEscape(config.pass3) + "'>";
 
   html += "<div class='grid'>";
   html += "<div><label>Latitud</label><input type='number' step='0.000001' name='lat' value='" + String(config.latitude, 6) + "' required></div>";
-  html += "<div><label>Longitud</label><input type='number' step='0.000001' name='lon' value='" + String(config.longitude, 6) + "' required></div>";
-  html += "</div>";
+  html += "<div><label>Longitud</label><input type='number' step='0.000001' name='lon' value='" + String(config.longitude, 6) + "' required></div></div>";
 
   html += "<label>Radio base (NM)</label><input type='number' min='1' max='250' name='radius' value='" + String(config.baseRadiusNM) + "' required>";
-  html += "<p class='small'>Solo los vuelos dentro de este radio mantienen la pantalla encendida automaticamente.</p>";
-
-  html += "<button type='submit'>Guardar y reiniciar</button>";
-  html += "</form></div></body></html>";
+  html += "<p class='small'>La pantalla queda encendida solo si hay vuelos dentro de este radio.</p>";
+  html += "<button type='submit'>Guardar y reiniciar</button></form></div></body></html>";
 
   return html;
 }
@@ -458,7 +394,6 @@ void handlePortalSave() {
   config.pass2 = webServer.arg("pass2");
   config.ssid3 = webServer.arg("ssid3");
   config.pass3 = webServer.arg("pass3");
-
   config.latitude = webServer.arg("lat").toDouble();
   config.longitude = webServer.arg("lon").toDouble();
   config.baseRadiusNM = webServer.arg("radius").toInt();
@@ -468,12 +403,10 @@ void handlePortalSave() {
 
   saveConfig();
 
-  String page =
-    "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<style>body{font-family:Arial;background:#101318;color:#eee;text-align:center;padding:40px}h2{color:#4dd0e1}</style></head>"
-    "<body><h2>Configuracion guardada</h2><p>El radar se reiniciara ahora.</p></body></html>";
+  webServer.send(200, "text/html; charset=utf-8",
+    "<html><body style='font-family:Arial;background:#101318;color:white;text-align:center;padding:40px'>"
+    "<h2>Configuracion guardada</h2><p>Reiniciando...</p></body></html>");
 
-  webServer.send(200, "text/html; charset=utf-8", page);
   delay(1200);
   ESP.restart();
 }
@@ -484,12 +417,10 @@ void startConfigPortal() {
 
   WiFi.disconnect(true);
   delay(300);
-
   WiFi.mode(WIFI_AP);
   WiFi.softAP(CONFIG_AP_SSID);
 
   IPAddress apIP = WiFi.softAPIP();
-
   dnsServer.start(DNS_PORT, "*", apIP);
 
   webServer.on("/", HTTP_GET, handlePortalRoot);
@@ -502,33 +433,18 @@ void startConfigPortal() {
   gfx->setTextSize(2);
   gfx->setCursor(28, 24);
   gfx->println("MODO CONFIG");
-
   gfx->setTextSize(1);
   gfx->setTextColor(WHITE);
   gfx->setCursor(22, 62);
   gfx->println("Conectate a:");
-
   gfx->setTextColor(YELLOW);
   gfx->setTextSize(2);
   gfx->setCursor(22, 78);
-  gfx->println("ADS-B-Radar-Setup");
-
+  gfx->println(CONFIG_AP_SSID);
   gfx->setTextSize(1);
-  gfx->setTextColor(GREY);
-  gfx->setCursor(22, 112);
-  gfx->println("Abrir navegador:");
-
   gfx->setTextColor(WHITE);
-  gfx->setTextSize(2);
-  gfx->setCursor(22, 128);
+  gfx->setCursor(22, 120);
   gfx->println(apIP.toString());
-
-  Serial.println();
-  Serial.println("Portal cautivo iniciado");
-  Serial.print("SSID: ");
-  Serial.println(CONFIG_AP_SSID);
-  Serial.print("IP: ");
-  Serial.println(apIP);
 
   while (true) {
     dnsServer.processNextRequest();
@@ -541,23 +457,10 @@ bool bootHeldForConfig() {
   if (digitalRead(BUTTON_BOOT) != LOW) return false;
 
   unsigned long start = millis();
-
-  gfx->fillScreen(BLACK);
-  gfx->setTextColor(YELLOW);
-  gfx->setTextSize(2);
-  gfx->setCursor(30, 55);
-  gfx->println("MANTENER BOOT");
-
-  gfx->setTextSize(1);
-  gfx->setTextColor(GREY);
-  gfx->setCursor(65, 88);
-  gfx->println("para configurar");
-
   while (digitalRead(BUTTON_BOOT) == LOW) {
     if (millis() - start >= CONFIG_BUTTON_HOLD) return true;
     delay(20);
   }
-
   return false;
 }
 
@@ -568,52 +471,27 @@ bool bootHeldForConfig() {
 bool tryWiFiNetwork(const String &ssid, const String &password) {
   if (ssid.length() == 0) return false;
 
-  Serial.print("Probando WiFi: ");
-  Serial.println(ssid);
-
-  gfx->fillRect(15, 82, 295, 42, BLACK);
-  gfx->setTextColor(GREY);
-  gfx->setTextSize(1);
-  gfx->setCursor(15, 84);
-  gfx->print("Probando: ");
-  gfx->setTextColor(WHITE);
-  gfx->print(ssid);
-
   WiFi.begin(ssid.c_str(), password.c_str());
-
   unsigned long started = millis();
 
-  while (WiFi.status() != WL_CONNECTED &&
-         millis() - started < 8000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - started < 8000) {
     delay(250);
-    Serial.print(".");
   }
 
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("WiFi conectado: ");
-    Serial.println(WiFi.SSID());
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
-    return true;
-  }
+  if (WiFi.status() == WL_CONNECTED) return true;
 
   WiFi.disconnect();
   delay(250);
-
   return false;
 }
 
 bool connectWiFi() {
   screenOn();
-
   gfx->fillScreen(BLACK);
   gfx->setTextColor(CYAN);
   gfx->setTextSize(2);
   gfx->setCursor(15, 30);
   gfx->println("RADAR ADS-B");
-
   gfx->setTextSize(1);
   gfx->setTextColor(WHITE);
   gfx->setCursor(15, 65);
@@ -621,25 +499,19 @@ bool connectWiFi() {
 
   WiFi.mode(WIFI_STA);
 
-  if (tryWiFiNetwork(config.ssid1, config.pass1) ||
-      tryWiFiNetwork(config.ssid2, config.pass2) ||
-      tryWiFiNetwork(config.ssid3, config.pass3)) {
+  bool ok =
+    tryWiFiNetwork(config.ssid1, config.pass1) ||
+    tryWiFiNetwork(config.ssid2, config.pass2) ||
+    tryWiFiNetwork(config.ssid3, config.pass3);
 
-    gfx->fillRect(15, 82, 295, 42, BLACK);
+  if (ok) {
     gfx->setTextColor(GREEN);
-    gfx->setCursor(15, 84);
+    gfx->setCursor(15, 85);
     gfx->println("WiFi OK");
-
-    gfx->setTextColor(WHITE);
-    gfx->setCursor(15, 100);
-    gfx->print("Red: ");
-    gfx->println(WiFi.SSID());
-
-    delay(700);
-    return true;
+    delay(500);
   }
 
-  return false;
+  return ok;
 }
 
 // ======================================================
@@ -660,76 +532,44 @@ void getRoute(Aircraft &a) {
 
   WiFiClientSecure client;
   client.setInsecure();
-
   HTTPClient http;
 
-  String url =
-    "https://api.adsbdb.com/v0/callsign/" +
-    a.callsign;
-
+  String url = "https://api.adsbdb.com/v0/callsign/" + a.callsign;
   if (!http.begin(client, url)) return;
 
   http.setTimeout(10000);
-
-  http.addHeader(
-    "User-Agent",
-    "ESP32-C6-FlightRadar/1.0"
-  );
-
-  http.addHeader(
-    "Accept",
-    "application/json"
-  );
+  http.addHeader("User-Agent", "ESP32-C6-FlightRadar/1.0");
+  http.addHeader("Accept", "application/json");
 
   int code = http.GET();
 
   if (code != 200) {
     http.end();
-
     lastRouteCallsign = a.callsign;
     lastOrigin = "---";
     lastDestination = "---";
-
     return;
   }
 
   JsonDocument doc;
-
-  DeserializationError error =
-    deserializeJson(
-      doc,
-      http.getStream()
-    );
-
-  if (error) {
+  if (deserializeJson(doc, http.getStream())) {
     http.end();
     return;
   }
 
-  JsonObject route =
-    doc["response"]["flightroute"];
-
+  JsonObject route = doc["response"]["flightroute"];
   if (route.isNull()) {
     http.end();
-
     lastRouteCallsign = a.callsign;
     lastOrigin = "---";
     lastDestination = "---";
-
     return;
   }
 
-  const char* oiata =
-    route["origin"]["iata_code"] | "";
-
-  const char* oicao =
-    route["origin"]["icao_code"] | "";
-
-  const char* diata =
-    route["destination"]["iata_code"] | "";
-
-  const char* dicao =
-    route["destination"]["icao_code"] | "";
+  const char* oiata = route["origin"]["iata_code"] | "";
+  const char* oicao = route["origin"]["icao_code"] | "";
+  const char* diata = route["destination"]["iata_code"] | "";
+  const char* dicao = route["destination"]["icao_code"] | "";
 
   if (strlen(oiata) > 0) a.origin = String(oiata);
   else if (strlen(oicao) > 0) a.origin = String(oicao);
@@ -740,7 +580,6 @@ void getRoute(Aircraft &a) {
   lastRouteCallsign = a.callsign;
   lastOrigin = a.origin;
   lastDestination = a.destination;
-
   http.end();
 }
 
@@ -757,12 +596,10 @@ bool getAircraft(int radiusNM) {
   }
 
   if (radiusNM > 250) radiusNM = 250;
-
   displayedRadiusNM = radiusNM;
 
   WiFiClientSecure client;
   client.setInsecure();
-
   HTTPClient http;
 
   String url =
@@ -771,47 +608,24 @@ bool getAircraft(int radiusNM) {
     String(config.longitude, 6) + "/" +
     String(radiusNM);
 
-  Serial.println();
-  Serial.print("Consultando radio ");
-  Serial.print(radiusNM);
-  Serial.println(" NM");
-
   if (!http.begin(client, url)) return false;
 
   http.setTimeout(15000);
-
-  http.addHeader(
-    "User-Agent",
-    "ESP32-C6-FlightRadar/1.0"
-  );
-
-  http.addHeader(
-    "Accept",
-    "application/json"
-  );
+  http.addHeader("User-Agent", "ESP32-C6-FlightRadar/1.0");
+  http.addHeader("Accept", "application/json");
 
   int httpCode = http.GET();
-
-  Serial.print("HTTP: ");
-  Serial.println(httpCode);
-
   if (httpCode != 200) {
     http.end();
     return false;
   }
 
   JsonDocument doc;
-
-  DeserializationError error =
-    deserializeJson(
-      doc,
-      http.getStream()
-    );
+  DeserializationError error = deserializeJson(doc, http.getStream());
 
   if (error) {
     Serial.print("JSON error: ");
     Serial.println(error.c_str());
-
     http.end();
     return false;
   }
@@ -819,87 +633,46 @@ bool getAircraft(int radiusNM) {
   aircraftCount = 0;
   featuredAircraftIndex = -1;
 
-  JsonArray ac =
-    doc["ac"].as<JsonArray>();
+  JsonArray ac = doc["ac"].as<JsonArray>();
 
   for (JsonObject plane : ac) {
     if (aircraftCount >= MAX_AIRCRAFT) break;
+    if (plane["lat"].isNull() || plane["lon"].isNull()) continue;
 
-    if (plane["lat"].isNull() ||
-        plane["lon"].isNull()) {
-      continue;
-    }
-
-    Aircraft &a =
-      aircraft[aircraftCount];
+    Aircraft &a = aircraft[aircraftCount];
 
     a.origin = "";
     a.destination = "";
-
     a.lat = plane["lat"] | 0.0;
     a.lon = plane["lon"] | 0.0;
 
-    const char* flight =
-      plane["flight"] | "";
-
+    const char* flight = plane["flight"] | "";
     a.callsign = String(flight);
     a.callsign.trim();
 
-    const char* hex =
-      plane["hex"] | "";
-
+    const char* hex = plane["hex"] | "";
     a.hex = String(hex);
+    if (a.callsign.length() == 0) a.callsign = a.hex;
 
-    if (a.callsign.length() == 0) {
-      a.callsign = a.hex;
-    }
-
-    const char* type =
-      plane["t"] | "";
-
+    const char* type = plane["t"] | "";
     a.type = String(type);
 
-    double gs =
-      plane["gs"] | 0.0;
-
-    a.speed =
-      gs * 1.852;
+    double gs = plane["gs"] | 0.0;
+    a.speed = gs * 1.852;
 
     if (plane["alt_baro"].is<float>() ||
         plane["alt_baro"].is<int>() ||
         plane["alt_baro"].is<double>()) {
-
-      double altFt =
-        plane["alt_baro"];
-
-      a.altitude =
-        altFt * 0.3048;
-
+      a.altitude = ((double)plane["alt_baro"]) * 0.3048;
     } else {
       a.altitude = 0;
     }
 
-    a.track =
-      plane["track"] | 0.0;
-
-    a.distanceKm =
-      getDistanceKm(
-        config.latitude,
-        config.longitude,
-        a.lat,
-        a.lon
-      );
-
-    a.bearing =
-      getBearing(
-        config.latitude,
-        config.longitude,
-        a.lat,
-        a.lon
-      );
+    a.track = plane["track"] | 0.0;
+    a.distanceKm = getDistanceKm(config.latitude, config.longitude, a.lat, a.lon);
+    a.bearing = getBearing(config.latitude, config.longitude, a.lat, a.lon);
 
     calculateClosestApproach(a);
-
     aircraftCount++;
   }
 
@@ -907,38 +680,8 @@ bool getAircraft(int radiusNM) {
 
   chooseFeaturedAircraft();
 
-  Serial.print("Aviones: ");
-  Serial.println(aircraftCount);
-
-  for (int i = 0; i < aircraftCount; i++) {
-    Serial.print(i);
-    Serial.print(" | ");
-    Serial.print(aircraft[i].callsign);
-    Serial.print(" | dist ");
-    Serial.print(aircraft[i].distanceKm, 1);
-    Serial.print(" km");
-
-    if (aircraft[i].approaching) {
-      Serial.print(" | CPA ");
-      Serial.print(aircraft[i].closestApproachKm, 1);
-      Serial.print(" km en ");
-      Serial.print(aircraft[i].minutesToClosest, 1);
-      Serial.print(" min");
-    } else {
-      Serial.print(" | alejandose/sin proyeccion");
-    }
-
-    if (i == featuredAircraftIndex) {
-      Serial.print(" | DESTACADO");
-    }
-
-    Serial.println();
-  }
-
   if (featuredAircraftIndex >= 0) {
-    getRoute(
-      aircraft[featuredAircraftIndex]
-    );
+    getRoute(aircraft[featuredAircraftIndex]);
   }
 
   return true;
@@ -948,43 +691,131 @@ bool getAircraft(int radiusNM) {
 // DIBUJAR AVION
 // ======================================================
 
-void drawPlane(
-  int x,
-  int y,
-  double heading,
-  uint16_t color
-) {
-  double a =
-    degToRad(
-      heading - 90.0
-    );
-
+void drawPlane(int x, int y, double heading, uint16_t color) {
+  double a = degToRad(heading - 90.0);
   double cosA = cos(a);
   double sinA = sin(a);
 
   int nx = x + cosA * 6;
   int ny = y + sinA * 6;
-
   int tx = x - cosA * 5;
   int ty = y - sinA * 5;
 
   double px = -sinA;
   double py = cosA;
 
-  int wx1 = x + px * 5;
-  int wy1 = y + py * 5;
-  int wx2 = x - px * 5;
-  int wy2 = y - py * 5;
-
-  int sx1 = tx + px * 3;
-  int sy1 = ty + py * 3;
-  int sx2 = tx - px * 3;
-  int sy2 = ty - py * 3;
-
   gfx->drawLine(nx, ny, tx, ty, color);
-  gfx->drawLine(wx1, wy1, wx2, wy2, color);
-  gfx->drawLine(sx1, sy1, sx2, sy2, color);
+  gfx->drawLine(x + px * 5, y + py * 5, x - px * 5, y - py * 5, color);
+  gfx->drawLine(tx + px * 3, ty + py * 3, tx - px * 3, ty - py * 3, color);
   gfx->fillCircle(x, y, 1, color);
+}
+
+// ======================================================
+// PANEL DERECHO - VISTA CLASICA
+// ======================================================
+
+void drawClassicPanel(Aircraft &a) {
+  // Mantiene el aspecto anterior: distancia, altura y velocidad.
+  gfx->setTextSize(1);
+  gfx->setTextColor(GREY);
+  gfx->setCursor(177, 64);
+  gfx->print("DIST");
+
+  gfx->setTextSize(2);
+  gfx->setTextColor(WHITE);
+  gfx->setCursor(177, 74);
+  gfx->print(a.distanceKm, 1);
+  gfx->print("km");
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(GREY);
+  gfx->setCursor(177, 98);
+  gfx->print("ALT");
+
+  gfx->setTextSize(2);
+  gfx->setTextColor(WHITE);
+  gfx->setCursor(177, 108);
+  if (a.altitude > 0) {
+    gfx->print(a.altitude, 0);
+    gfx->print("m");
+  } else {
+    gfx->print("---");
+  }
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(GREY);
+  gfx->setCursor(177, 132);
+  gfx->print("VEL");
+
+  gfx->setTextSize(2);
+  gfx->setTextColor(WHITE);
+  gfx->setCursor(177, 142);
+  gfx->print(a.speed, 0);
+  gfx->print("kmh");
+}
+
+// ======================================================
+// PANEL DERECHO - VISTA PROXIMIDAD
+// ======================================================
+
+void drawProximityPanel(Aircraft &a) {
+  // Todo blanco y con fuente mas grande que la version anterior.
+  gfx->setTextColor(WHITE);
+
+  if (a.cpaValid && a.approaching) {
+    bool passesNear = a.closestApproachKm <= PASS_NEAR_KM;
+
+    gfx->setTextSize(2);
+    gfx->setCursor(177, 66);
+
+    if (passesNear) {
+      gfx->print("PASA");
+      gfx->setCursor(177, 84);
+      gfx->print("CERCA");
+    } else {
+      gfx->print("APROX");
+    }
+
+    gfx->setTextSize(1);
+    gfx->setCursor(177, 105);
+    gfx->print("EN");
+
+    gfx->setTextSize(2);
+    gfx->setCursor(177, 116);
+    gfx->print(formatEta(a.minutesToClosest));
+
+    gfx->setTextSize(1);
+    gfx->setCursor(177, 140);
+    gfx->print("MIN DIST");
+
+    gfx->setTextSize(2);
+    gfx->setCursor(177, 150);
+    gfx->print(a.closestApproachKm, 1);
+    gfx->print("km");
+
+  } else {
+    gfx->setTextSize(2);
+    gfx->setCursor(177, 78);
+
+    if (a.cpaValid) {
+      gfx->print("SE");
+      gfx->setCursor(177, 98);
+      gfx->print("ALEJA");
+    } else {
+      gfx->print("SIN");
+      gfx->setCursor(177, 98);
+      gfx->print("PROY.");
+    }
+
+    gfx->setTextSize(1);
+    gfx->setCursor(177, 128);
+    gfx->print("DIST ACTUAL");
+
+    gfx->setTextSize(2);
+    gfx->setCursor(177, 140);
+    gfx->print(a.distanceKm, 1);
+    gfx->print("km");
+  }
 }
 
 // ======================================================
@@ -997,9 +828,7 @@ void drawRadar() {
   const int CX = 82;
   const int CY = 86;
   const int R = 70;
-
-  double maxKm =
-    displayedRadiusNM * 1.852;
+  double maxKm = displayedRadiusNM * 1.852;
 
   gfx->drawCircle(CX, CY, R, DARKGREY);
   gfx->drawCircle(CX, CY, R * 2 / 3, DARKGREY);
@@ -1015,86 +844,26 @@ void drawRadar() {
   gfx->setCursor(2, CY - 3);   gfx->print("O");
   gfx->setCursor(157, CY - 3); gfx->print("E");
 
-  // Aviones
   for (int i = 0; i < aircraftCount; i++) {
     Aircraft &a = aircraft[i];
-
     if (a.distanceKm > maxKm) continue;
 
-    double normalized =
-      a.distanceKm / maxKm;
+    double radius = (a.distanceKm / maxKm) * R;
+    double angle = degToRad(a.bearing - 90.0);
+    int x = CX + cos(angle) * radius;
+    int y = CY + sin(angle) * radius;
 
-    double radius =
-      normalized * R;
+    uint16_t color = (i == featuredAircraftIndex) ? YELLOW : CYAN;
+    drawPlane(x, y, a.track, color);
 
-    double angle =
-      degToRad(
-        a.bearing - 90.0
-      );
-
-    int x =
-      CX +
-      cos(angle) * radius;
-
-    int y =
-      CY +
-      sin(angle) * radius;
-
-    uint16_t color =
-      (i == featuredAircraftIndex)
-      ? YELLOW
-      : CYAN;
-
-    drawPlane(
-      x,
-      y,
-      a.track,
-      color
-    );
-
-    // Indica hacia donde continua el avion destacado.
-    if (i == featuredAircraftIndex) {
-      double tr =
-        degToRad(
-          a.track - 90.0
-        );
-
-      int tx =
-        x + cos(tr) * 12;
-
-      int ty =
-        y + sin(tr) * 12;
-
-      gfx->drawLine(
-        x,
-        y,
-        tx,
-        ty,
-        YELLOW
-      );
-    }
-
-    if (i < 5 &&
-        a.callsign.length() > 0) {
-
-      String label =
-        a.callsign;
-
-      if (label.length() > 6) {
-        label =
-          label.substring(0, 6);
-      }
+    if (i < 5 && a.callsign.length() > 0) {
+      String label = a.callsign;
+      if (label.length() > 6) label = label.substring(0, 6);
 
       int labelX = x + 5;
       int labelY = y - 10;
-
-      if (labelX > 130) {
-        labelX = x - 35;
-      }
-
-      if (labelY < 0) {
-        labelY = y + 5;
-      }
+      if (labelX > 130) labelX = x - 35;
+      if (labelY < 0) labelY = y + 5;
 
       gfx->setTextSize(1);
       gfx->setTextColor(color);
@@ -1103,61 +872,37 @@ void drawRadar() {
     }
   }
 
-  // Panel derecho
-  gfx->drawLine(
-    168,
-    0,
-    168,
-    171,
-    DARKGREY
-  );
+  gfx->drawLine(168, 0, 168, 171, DARKGREY);
 
   gfx->setTextSize(1);
-
-  gfx->setTextColor(
-    (manualMode || startupMode)
-      ? YELLOW
-      : CYAN
-  );
-
+  gfx->setTextColor((manualMode || startupMode) ? YELLOW : CYAN);
   gfx->setCursor(177, 3);
   gfx->print(displayedRadiusNM);
   gfx->print("NM ");
   gfx->print(maxKm, 0);
   gfx->print("km");
 
-  if (aircraftCount == 0 ||
-      featuredAircraftIndex < 0) {
-
-    gfx->setTextColor(GREY);
+  if (aircraftCount == 0 || featuredAircraftIndex < 0) {
+    gfx->setTextColor(WHITE);
     gfx->setTextSize(2);
-
     gfx->setCursor(183, 60);
     gfx->print("SIN");
-
     gfx->setCursor(177, 82);
     gfx->print("VUELOS");
-
     return;
   }
 
-  Aircraft &a =
-    aircraft[featuredAircraftIndex];
+  Aircraft &a = aircraft[featuredAircraftIndex];
 
-  // Callsign
+  // Cabecera comun a ambas vistas.
   gfx->setTextColor(YELLOW);
   gfx->setTextSize(2);
   gfx->setCursor(177, 18);
 
   String cs = a.callsign;
-
-  if (cs.length() > 8) {
-    cs = cs.substring(0, 8);
-  }
-
+  if (cs.length() > 8) cs = cs.substring(0, 8);
   gfx->print(cs);
 
-  // Origen y destino
   gfx->setTextSize(2);
   gfx->setTextColor(CYAN);
   gfx->setCursor(177, 40);
@@ -1165,86 +910,21 @@ void drawRadar() {
   gfx->print(">");
   gfx->print(a.destination);
 
-  // Distancia actual
-  gfx->setTextSize(1);
-  gfx->setTextColor(GREY);
-  gfx->setCursor(177, 64);
-  gfx->print("AHORA");
-
-  gfx->setTextSize(2);
-  gfx->setTextColor(WHITE);
-  gfx->setCursor(177, 74);
-  gfx->print(a.distanceKm, 1);
-  gfx->print("km");
-
-  // Tiempo y distancia de maxima aproximacion
-  if (a.cpaValid && a.approaching) {
-    bool passesNear =
-      a.closestApproachKm <= PASS_NEAR_KM;
-
-    gfx->setTextSize(1);
-    gfx->setTextColor(
-      passesNear
-        ? GREEN
-        : YELLOW
-    );
-
-    gfx->setCursor(177, 98);
-
-    if (passesNear) {
-      gfx->print("PASA CERCA");
-    } else {
-      gfx->print("MAX APROX");
-    }
-
-    gfx->setTextSize(2);
-    gfx->setTextColor(WHITE);
-    gfx->setCursor(177, 108);
-
-    String eta =
-      formatEta(
-        a.minutesToClosest
-      );
-
-    gfx->print(eta);
-
-    gfx->setTextSize(1);
-    gfx->setTextColor(GREY);
-    gfx->setCursor(177, 132);
-    gfx->print("MIN");
-
-    gfx->setTextSize(2);
-    gfx->setTextColor(WHITE);
-    gfx->setCursor(177, 142);
-    gfx->print(a.closestApproachKm, 1);
-    gfx->print("km");
-
+  if (showProximityPanel) {
+    drawProximityPanel(a);
   } else {
+    drawClassicPanel(a);
+  }
+}
 
-    gfx->setTextSize(1);
-    gfx->setTextColor(GREY);
-    gfx->setCursor(177, 104);
+void updatePanelRotation() {
+  // Solo rota cuando realmente hay algo visible en pantalla.
+  if (aircraftCount <= 0 || featuredAircraftIndex < 0) return;
 
-    if (a.cpaValid) {
-      gfx->print("SE ALEJA");
-    } else {
-      gfx->print("SIN PROYECCION");
-    }
-
-    gfx->setCursor(177, 122);
-    gfx->print("ALT ");
-
-    if (a.altitude > 0) {
-      gfx->print(a.altitude, 0);
-      gfx->print("m");
-    } else {
-      gfx->print("---");
-    }
-
-    gfx->setCursor(177, 139);
-    gfx->print("VEL ");
-    gfx->print(a.speed, 0);
-    gfx->print("kmh");
+  if (millis() - lastPanelRotation >= PANEL_ROTATION_INTERVAL) {
+    lastPanelRotation = millis();
+    showProximityPanel = !showProximityPanel;
+    drawRadar();
   }
 }
 
@@ -1253,37 +933,32 @@ void drawRadar() {
 // ======================================================
 
 void performBaseSearch() {
-  if (!getAircraft(config.baseRadiusNM)) {
-    return;
-  }
+  if (!getAircraft(config.baseRadiusNM)) return;
 
-  baseHasAircraft =
-    aircraftCount > 0;
+  baseHasAircraft = aircraftCount > 0;
 
   if (baseHasAircraft) {
     manualMode = false;
     manualLevel = 0;
-
     screenOn();
 
-    if (!hadBaseAircraft) {
-      startAircraftAlert();
-    }
+    if (!hadBaseAircraft) startAircraftAlert();
 
     hadBaseAircraft = true;
+
+    // Cada nueva consulta vuelve a la vista clasica primero.
+    showProximityPanel = false;
+    lastPanelRotation = millis();
 
     drawRadar();
     return;
   }
 
   hadBaseAircraft = false;
-
   alertBlinking = false;
   rgbOff();
 
-  if (manualMode || startupMode) {
-    return;
-  }
+  if (manualMode || startupMode) return;
 
   gfx->fillScreen(BLACK);
   screenOff();
@@ -1296,55 +971,39 @@ void performBaseSearch() {
 void performStartupSearch() {
   startupMode = true;
   startupFoundAircraft = false;
-
   screenOn();
 
-  for (int level = 0;
-       level < SEARCH_LEVELS;
-       level++) {
-
-    int radius =
-      radiusForLevel(level);
+  for (int level = 0; level < SEARCH_LEVELS; level++) {
+    int radius = radiusForLevel(level);
 
     gfx->fillScreen(BLACK);
-
     gfx->setTextColor(CYAN);
     gfx->setTextSize(2);
     gfx->setCursor(70, 45);
     gfx->print("BUSCANDO");
-
     gfx->setTextColor(YELLOW);
     gfx->setCursor(95, 75);
     gfx->print(radius);
     gfx->print(" NM");
 
-    if (getAircraft(radius) &&
-        aircraftCount > 0) {
-
+    if (getAircraft(radius) && aircraftCount > 0) {
       startupFoundAircraft = true;
-
-      startupDisplayStart =
-        millis();
-
+      startupDisplayStart = millis();
+      showProximityPanel = false;
+      lastPanelRotation = millis();
       drawRadar();
-
       return;
     }
 
     if (radius >= 250) break;
-
     delay(400);
   }
 
   startupMode = false;
   startupFoundAircraft = false;
-
   aircraftCount = 0;
   featuredAircraftIndex = -1;
-
-  displayedRadiusNM =
-    config.baseRadiusNM;
-
+  displayedRadiusNM = config.baseRadiusNM;
   baseHasAircraft = false;
   hadBaseAircraft = false;
 
@@ -1353,31 +1012,17 @@ void performStartupSearch() {
 }
 
 void updateStartupMode() {
-  if (!startupMode ||
-      !startupFoundAircraft) {
-    return;
-  }
-
-  if (millis() -
-      startupDisplayStart <
-      STARTUP_DISPLAY_DURATION) {
-
-    return;
-  }
+  if (!startupMode || !startupFoundAircraft) return;
+  if (millis() - startupDisplayStart < STARTUP_DISPLAY_DURATION) return;
 
   startupMode = false;
   startupFoundAircraft = false;
-
-  displayedRadiusNM =
-    config.baseRadiusNM;
-
+  displayedRadiusNM = config.baseRadiusNM;
   manualMode = false;
   manualLevel = 0;
 
   performBaseSearch();
-
-  lastUpdate =
-    millis();
+  lastUpdate = millis();
 }
 
 // ======================================================
@@ -1386,23 +1031,15 @@ void updateStartupMode() {
 
 void performManualSearch() {
   manualLevel++;
+  if (manualLevel > SEARCH_LEVELS) manualLevel = 1;
 
-  if (manualLevel > SEARCH_LEVELS) {
-    manualLevel = 1;
-  }
-
-  int radius =
-    radiusForLevel(
-      manualLevel - 1
-    );
+  int radius = radiusForLevel(manualLevel - 1);
 
   manualMode = true;
   manualScreenStart = millis();
-
   screenOn();
 
   gfx->fillScreen(BLACK);
-
   gfx->setTextColor(YELLOW);
   gfx->setTextSize(2);
   gfx->setCursor(70, 50);
@@ -1416,6 +1053,8 @@ void performManualSearch() {
   gfx->print("Buscando...");
 
   if (getAircraft(radius)) {
+    showProximityPanel = false;
+    lastPanelRotation = millis();
     drawRadar();
   }
 }
@@ -1424,54 +1063,32 @@ void updateButton() {
   static bool previousButton = HIGH;
   static unsigned long lastButtonTime = 0;
 
-  bool button =
-    digitalRead(
-      BUTTON_BOOT
-    );
+  bool button = digitalRead(BUTTON_BOOT);
 
-  if (previousButton == HIGH &&
-      button == LOW) {
+  if (previousButton == HIGH && button == LOW) {
+    if (millis() - lastButtonTime > 250) {
+      lastButtonTime = millis();
 
-    if (millis() -
-        lastButtonTime > 250) {
-
-      lastButtonTime =
-        millis();
-
-      if (!startupMode &&
-          !baseHasAircraft) {
-
+      if (!startupMode && !baseHasAircraft) {
         performManualSearch();
       }
     }
   }
 
-  previousButton =
-    button;
+  previousButton = button;
 }
 
 void updateManualTimeout() {
   if (!manualMode) return;
-
-  if (millis() -
-      manualScreenStart <
-      MANUAL_SCREEN_DURATION) {
-
-    return;
-  }
+  if (millis() - manualScreenStart < MANUAL_SCREEN_DURATION) return;
 
   manualMode = false;
   manualLevel = 0;
 
   if (baseHasAircraft) {
-
-    displayedRadiusNM =
-      config.baseRadiusNM;
-
+    displayedRadiusNM = config.baseRadiusNM;
     performBaseSearch();
-
   } else {
-
     gfx->fillScreen(BLACK);
     screenOff();
   }
@@ -1497,27 +1114,16 @@ void setup() {
 
   loadConfig();
 
-  // Mantener BOOT 3 segundos al encender para reconfigurar.
-  if (bootHeldForConfig()) {
+  if (bootHeldForConfig()) startConfigPortal();
+
+  if (!config.configured || config.ssid1.length() == 0) {
     startConfigPortal();
   }
 
-  // Primera vez: abre portal directamente.
-  if (!config.configured ||
-      config.ssid1.length() == 0) {
-
-    startConfigPortal();
-  }
-
-  // Si ninguna Wi-Fi guardada esta disponible, abre portal.
-  if (!connectWiFi()) {
-    startConfigPortal();
-  }
+  if (!connectWiFi()) startConfigPortal();
 
   performStartupSearch();
-
-  lastUpdate =
-    millis();
+  lastUpdate = millis();
 }
 
 // ======================================================
@@ -1528,22 +1134,18 @@ void loop() {
   updateAircraftAlert();
 
   if (startupMode) {
+    updatePanelRotation();
     updateStartupMode();
-
     delay(20);
     return;
   }
 
   updateButton();
   updateManualTimeout();
+  updatePanelRotation();
 
-  if (millis() -
-      lastUpdate >=
-      UPDATE_INTERVAL) {
-
-    lastUpdate =
-      millis();
-
+  if (millis() - lastUpdate >= UPDATE_INTERVAL) {
+    lastUpdate = millis();
     performBaseSearch();
   }
 
