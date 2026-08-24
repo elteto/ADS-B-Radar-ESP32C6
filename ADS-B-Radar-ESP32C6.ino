@@ -15,7 +15,7 @@ const unsigned long STARTUP_DISPLAY_DURATION = 60000;
 const unsigned long ALERT_DURATION = 30000;
 const unsigned long BLINK_INTERVAL = 400;
 const unsigned long CONFIG_BUTTON_HOLD = 3000;
-const unsigned long PANEL_ROTATION_INTERVAL = 10000;
+const unsigned long PANEL_ROTATION_INTERVAL = 5000;
 
 const double PASS_NEAR_KM = 10.0;
 const double MAX_CPA_HOURS = 2.0;
