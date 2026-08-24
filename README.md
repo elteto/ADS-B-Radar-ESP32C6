@@ -2,7 +2,7 @@
 
 Radar de vuelos cercanos para la placa **Waveshare ESP32-C6-LCD-1.47**.
 
-El proyecto consulta tráfico ADS-B por Internet, muestra los aviones cercanos en un radar gráfico y calcula una estimación de qué aeronave va a pasar más cerca de la ubicación configurada y en cuánto tiempo ocurrirá esa máxima aproximación.
+El proyecto consulta tráfico ADS-B por Internet, muestra los aviones cercanos en un radar gráfico y calcula qué aeronave proyecta pasar más cerca de la ubicación configurada y en cuánto tiempo ocurrirá esa máxima aproximación.
 
 La configuración de Wi-Fi, coordenadas y radio base se realiza desde un **portal cautivo**, por lo que no es necesario guardar claves ni ubicación dentro del código fuente.
 
@@ -13,14 +13,17 @@ La configuración de Wi-Fi, coordenadas y radio base se realiza desde un **porta
 - Cálculo local de distancia, posición relativa, rumbo, altitud y velocidad.
 - Cálculo de **máxima aproximación (CPA)** usando posición, `track` y velocidad actuales.
 - Estimación del **tiempo hasta el punto de máxima aproximación**.
-- El avión destacado en amarillo es el que proyecta pasar más cerca; si ninguno se aproxima, se muestra el más cercano actual.
+- El avión destacado inicialmente es el que proyecta pasar más cerca; si ninguno se aproxima, se selecciona el más cercano actual.
 - Indicador `PASA CERCA` cuando la trayectoria proyectada pasa a menos de 10 km del radar.
-- Línea de trayectoria sobre el avión destacado.
-- Consulta de **origen y destino** del vuelo destacado mediante **ADSBDB**.
+- Consulta de **origen y destino** mediante **ADSBDB**.
+- Panel derecho con **dos vistas que rotan automáticamente cada 10 segundos**.
+- Vista clásica con `DISTANCIA`, `ALTURA` y `VELOCIDAD` claramente identificadas.
+- Vista de proximidad con tiempo hasta la máxima aproximación y distancia mínima proyectada.
+- Si hay varios vuelos, una pulsación de **BOOT cambia al siguiente avión**.
 - Hasta **3 redes Wi-Fi configurables** desde el portal cautivo.
 - Latitud, longitud y radio base configurables sin recompilar.
 - Configuración persistente mediante `Preferences`.
-- Botón **BOOT** para búsquedas manuales por rangos.
+- BOOT para búsquedas manuales por rangos cuando no hay vuelos.
 - Mantener **BOOT durante 3 segundos al encender** para abrir el portal de configuración.
 - LED RGB integrado como alerta de nuevos vuelos.
 - Apagado automático del backlight cuando no hay vuelos en el radio base.
@@ -84,7 +87,7 @@ Solamente los vuelos detectados dentro de ese radio mantienen la pantalla encend
 
 Por ejemplo, `15 NM` son aproximadamente `28 km`.
 
-El modo normal consulta la API cada 30 segundos.
+El modo normal consulta la API cada **30 segundos**.
 
 ### Búsqueda inicial
 
@@ -117,9 +120,112 @@ Cuando no hay aviones dentro del radio base:
 
 En cuanto aparece una aeronave dentro del radio base, la pantalla se enciende automáticamente.
 
-## Botón BOOT
+## Pantalla
 
-Una vez terminado el modo inicial, si no hay vuelos dentro del radio base, **BOOT** permite explorar radios progresivamente mayores.
+La pantalla está dividida en dos sectores principales.
+
+### Radar izquierdo
+
+La mitad izquierda muestra:
+
+- círculos concéntricos de distancia;
+- Norte, Sur, Este y Oeste;
+- posición del observador en el centro;
+- posición relativa de las aeronaves;
+- orientación aproximada de cada avión según su `track`;
+- callsigns de los primeros vuelos;
+- avión seleccionado resaltado en amarillo.
+
+### Panel derecho
+
+El panel derecho mantiene siempre arriba:
+
+- callsign del avión seleccionado;
+- origen y destino cuando ADSBDB dispone de la ruta.
+
+Debajo, el contenido **alterna automáticamente cada 10 segundos** entre dos vistas.
+
+#### Vista clásica
+
+Muestra los datos de vuelo habituales, con una etiqueta pequeña que identifica claramente cada valor:
+
+```text
+DISTANCIA
+18.4km
+
+ALTURA
+10360m
+
+VELOCIDAD
+842kmh
+```
+
+Los tres campos son:
+
+- **DISTANCIA:** distancia actual desde el radar hasta el avión;
+- **ALTURA:** altitud barométrica convertida a metros;
+- **VELOCIDAD:** velocidad sobre el suelo convertida a km/h.
+
+#### Vista de proximidad
+
+Muestra la proyección de máxima aproximación con texto blanco y los valores principales destacados.
+
+Si el avión proyecta pasar a menos de 10 km:
+
+```text
+PASA
+CERCA
+
+EN
+4m
+
+MIN DIST
+3.2km
+```
+
+Si se aproxima pero pasará más lejos, se muestra `APROXIMACION`, el tiempo restante y la distancia mínima proyectada.
+
+Si el punto de máxima aproximación ya quedó atrás:
+
+```text
+SE
+ALEJA
+
+DIST ACTUAL
+18.4km
+```
+
+Si no hay datos suficientes para realizar la proyección se muestra `SIN PROY.`.
+
+Cada vez que se reciben datos nuevos o se cambia manualmente de avión, el panel vuelve primero a la **vista clásica** y luego continúa alternando cada 10 segundos.
+
+## Selección de vuelos con BOOT
+
+El comportamiento de BOOT depende del estado del radar.
+
+### Cuando hay más de un vuelo
+
+Una pulsación corta de **BOOT** selecciona el siguiente avión disponible.
+
+Por ejemplo, si hay tres vuelos:
+
+```text
+Vuelo 1 -> BOOT -> Vuelo 2 -> BOOT -> Vuelo 3 -> BOOT -> Vuelo 1
+```
+
+Al cambiar de avión:
+
+- el nuevo avión queda resaltado en amarillo;
+- el panel derecho muestra sus datos;
+- se intenta obtener su origen y destino;
+- la pantalla vuelve primero a la vista clásica;
+- después continúa la rotación clásica/proximidad cada 10 segundos.
+
+Esto permite recorrer manualmente todos los vuelos detectados sin esperar a que cambie automáticamente el avión destacado.
+
+### Cuando no hay vuelos en el radio base
+
+BOOT conserva la función de exploración manual de radios progresivamente mayores.
 
 Con radio base de 15 NM:
 
@@ -136,10 +242,18 @@ Cada pulsación reinicia un temporizador de **15 segundos**.
 
 Los vuelos encontrados fuera del radio base no mantienen la pantalla encendida cuando termina el modo manual.
 
-BOOT tiene además una segunda función:
+### BOOT al encender
 
-- pulsación normal durante el uso: ampliar el rango manual;
-- mantenerlo presionado unos 3 segundos al arrancar: abrir el portal cautivo.
+Mantener BOOT presionado aproximadamente **3 segundos durante el arranque** abre el portal cautivo de configuración.
+
+En resumen:
+
+| Estado | Acción BOOT |
+|---|---|
+| Hay varios vuelos | cambia al siguiente avión |
+| Hay un solo vuelo | mantiene el vuelo seleccionado |
+| No hay vuelos | amplía progresivamente el rango de búsqueda |
+| BOOT mantenido al arrancar | abre el portal cautivo |
 
 ## Alerta RGB
 
@@ -147,7 +261,7 @@ Cuando el radar pasa de cero vuelos a detectar al menos uno dentro del radio bas
 
 - la pantalla se enciende;
 - el LED RGB parpadea en rojo;
-- la alerta dura 30 segundos.
+- la alerta dura **30 segundos**.
 
 Después el LED se apaga, pero la pantalla permanece encendida mientras haya vuelos dentro del radio base.
 
@@ -164,29 +278,9 @@ A partir de eso obtiene:
 - minutos hasta esa máxima aproximación;
 - si el avión todavía se está acercando o ya se aleja.
 
-El avión destacado en amarillo es el que tiene la **menor distancia mínima proyectada**, aunque en ese momento no sea el avión físicamente más cercano.
+Inicialmente se destaca el avión con la **menor distancia mínima proyectada**, aunque en ese momento no sea el avión físicamente más cercano. Si no hay una proyección futura válida, se utiliza el avión actualmente más cercano.
 
-Si la mínima proyectada es de `10 km` o menos, la pantalla muestra:
-
-```text
-PASA CERCA
-4m
-MIN
-3.2km
-```
-
-Si pasará más lejos pero todavía se aproxima, muestra:
-
-```text
-MAX APROX
-8m
-MIN
-24.6km
-```
-
-Si el punto de máxima aproximación ya pasó, muestra `SE ALEJA`.
-
-La predicción se limita a un horizonte de 2 horas.
+La predicción se limita a un horizonte de **2 horas**.
 
 ### Limitación de la estimación
 
@@ -194,43 +288,17 @@ No es un plan de vuelo ni una predicción aeronáutica oficial. Es una extrapola
 
 Si el avión cambia de rumbo o velocidad, el cálculo cambia en la siguiente actualización. En vuelos de crucero suele ser una estimación útil; cerca de aeropuertos, durante ascensos, descensos o virajes, puede variar rápidamente.
 
-## Información mostrada
+## Origen y destino
 
-Para el avión destacado se muestra:
+Para el avión seleccionado se consulta ADSBDB utilizando el callsign.
 
-- callsign;
-- origen y destino;
-- distancia actual;
-- tiempo estimado hasta máxima aproximación;
-- distancia mínima proyectada.
-
-Cuando no existe una proyección válida se muestran altitud y velocidad como información alternativa.
-
-Ejemplo:
+Cuando la información está disponible se muestra, por ejemplo:
 
 ```text
-AZU2080
 AEP>SLA
-
-AHORA
-42.1km
-
-PASA CERCA
-4m
-
-MIN
-3.2km
 ```
 
-En la mitad izquierda se muestra un radar circular con:
-
-- Norte, Sur, Este y Oeste;
-- posición del observador en el centro;
-- posición relativa de las aeronaves;
-- orientación aproximada según `track`;
-- callsigns de los primeros vuelos;
-- avión proyectado a pasar más cerca resaltado en amarillo;
-- pequeña línea indicando su dirección de movimiento.
+Si no existe una ruta disponible, se muestra `---`.
 
 ## Hardware
 
@@ -291,7 +359,7 @@ https://api.airplanes.live/v2/point/LAT/LON/RADIO
 
 ### ADSBDB
 
-Se utiliza para intentar obtener la ruta asociada al callsign del avión destacado y mostrar aeropuerto de origen y destino.
+Se utiliza para intentar obtener la ruta asociada al callsign del avión seleccionado y mostrar aeropuerto de origen y destino.
 
 La ruta puede no estar disponible para todos los vuelos.
 
@@ -325,11 +393,32 @@ ENCENDIDO
                   +-- modo normal en radio base
                           |
                           +-- hay vuelos --> LCD ON
+                          |      |
+                          |      +-- vista clasica
+                          |      |      |
+                          |      |      +-- 10 s
+                          |      |             |
+                          |      +------> vista proximidad
+                          |      |             |
+                          |      |             +-- 10 s --> clasica
+                          |      |
+                          |      +-- BOOT --> siguiente vuelo
                           |
                           +-- no hay -----> LCD OFF
                                              |
                                              +-- BOOT --> busqueda manual
 ```
+
+## Temporizadores principales
+
+| Función | Tiempo |
+|---|---:|
+| Actualización de vuelos | 30 s |
+| Rotación clásica / proximidad | 10 s |
+| Pantalla de búsqueda manual | 15 s |
+| Búsqueda inicial encontrada | 60 s |
+| Parpadeo de alerta RGB | 30 s |
+| BOOT para configuración al arrancar | 3 s |
 
 ## Notas
 
@@ -339,6 +428,7 @@ ENCENDIDO
 - El límite de búsqueda es 250 NM.
 - Las credenciales se guardan en la flash local del dispositivo, no en GitHub.
 - La estimación de máxima aproximación supone rumbo y velocidad constantes.
+- Las unidades mostradas son kilómetros, metros y km/h, aunque el radio de búsqueda se configura en millas náuticas.
 
 ## Estado
 
